@@ -1,0 +1,53 @@
+# Auto detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Source files
+*.c text
+*.h text
+*.md text
+*.txt text
+*.json text
+*.yml text
+*.yaml text
+*.toml text
+
+# Binary files (set to binary to prevent any modification)
+*.bin binary
+*.o binary
+*.a binary
+*.so binary
+*.dll binary
+*.exe binary
+*.lib binary
+*.dylib binary
+*.nes binary
+*.NES binary
+
+# Shell scripts (ensure they have LF line endings)
+*.sh text eol=lf
+
+# Windows specific files
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=lf
+
+# Git merge files
+*.orig binary
+*.rej binary
+
+# Documentation
+LICENSE* text
+README* text
+CHANGELOG* text
+CONTRIBUTING* text
+AUTHORS* text
+
+# Editor specific files
+.editorconfig text
+.gitattributes text
+.gitignore text
+
+# Meson build system
+meson.build text
+meson_options.txt text
+*.wrap text

@@ -1,0 +1,70 @@
+# EditorConfig is awesome: https://EditorConfig.org
+
+# Top-most EditorConfig file
+root = true
+
+# Unix-style newlines with a newline ending every file
+[*]
+end_of_line = lf
+insert_final_newline = true
+charset = utf-8
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# C source files
+[*.{c,h}]
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Markdown files
+[*.md]
+trim_trailing_whitespace = false
+
+# Makefiles use tabs for indentation
+[Makefile]
+indent_style = tab
+
+# Batch files use CRLF
+[*.{cmd,bat}]
+end_of_line = crlf
+
+# Shell scripts
+[*.sh]
+indent_style = space
+indent_size = 4
+
+# YAML files
+[*.{yaml,yml}]
+indent_style = space
+indent_size = 2
+
+# JSON files
+[*.json]
+indent_style = space
+indent_size = 2
+
+# Meson build files
+[meson.build]
+indent_style = space
+indent_size = 4
+
+# Git related files
+[.git{attributes,ignore}]
+indent_style = space
+indent_size = 4
+
+# Windows specific files
+[*.{cmd,bat}]
+end_of_line = crlf
+
+# Project files
+[*.sln]
+indent_style = space
+indent_size = 4
+
+[*.vcxproj]
+indent_style = space
+indent_size = 2

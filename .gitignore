@@ -1,0 +1,74 @@
+# Build directories
+/build/
+/build-*/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+*.lib
+*.dylib
+*.pdb
+*.ilk
+*.exp
+*.manifest
+
+# Executable
+/nes83x
+/nes83x.exe
+
+# IDE specific files
+.vscode/
+.idea/
+*.sln
+*.vcxproj*
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor specific files
+*.swp
+*~
+*.swo
+*~
+*.swn
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+
+# Local development files
+*.local
+
+# Test files
+*.test
+*.out
+
+# ROM files
+*.nes
+*.NES
+
+# Dependency directories
+/deps/
+/subprojects/
+
+# Meson build system
+/meson-logs/
+/meson-private/
+/meson-info/
+/meson-test-*/
+/compile_commands.json
