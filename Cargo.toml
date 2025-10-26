@@ -1,0 +1,49 @@
+[package]
+name = "nes83x-rs"
+version = "0.1.0"
+edition = "2021"
+description = "A NES emulator written in Rust"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT"
+repository = "https://github.com/yourusername/nes83x-rs"
+
+[dependencies]
+# GTK4 for the user interface
+gtk = { version = "0.7.0", package = "gtk4", features = ["v4_8"] }
+gio = { version = "0.18.0", features = ["v2_66"] }
+glib = "0.18.0"
+gdk4 = { version = "0.7.0", features = ["v4_8"] }
+gdk-pixbuf = "0.18.0"
+
+# Error handling and logging
+anyhow = "1.0"
+thiserror = "1.0"
+log = "0.4"
+simplelog = "0.12"
+
+# Command-line argument parsing
+clap = { version = "4.0", features = ["derive"] }
+
+# Data structures and utilities
+bitflags = "2.0"
+bytemuck = { version = "1.0", features = ["derive"] }
+
+# For future use (audio, etc.)
+# rodio = "0.17"
+# image = { version = "0.24", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+assert_matches = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1  # Better performance during development
+
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1

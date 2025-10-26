@@ -1,50 +1,89 @@
-# Nes83x - NES Emulator
+# NES83x - NES Emulator in Rust
 
-A minimal NES emulator written in C with GTK4 for the user interface, inspired by Snes9x.
+A NES emulator written in Rust with GTK4 for the user interface.
 
 ## Features
 
-- [ ] CPU emulation (6502)
+- [x] Basic CPU emulation (6502)
 - [ ] PPU emulation (Picture Processing Unit)
-- [ ] Basic input handling
-- [ ] ROM loading
-- [ ] Basic video output
-- [ ] Sound (stretch goal)
+- [ ] APU emulation (Audio Processing Unit)
+- [ ] Mapper support (currently only NROM)
+- [ ] Save states
+- [ ] Controller support (keyboard only for now)
+- [ ] Game Genie/Action Replay codes
 
-## Dependencies
+## Screenshot
 
-### Arch Linux (WSL)
+*Screenshot will be added when the emulator has video output*
+
+## Requirements
+
+- Rust (latest stable version recommended)
+- GTK4 and development files
+- pkg-config
+
+### Ubuntu/Debian
 
 ```bash
-sudo pacman -S base-devel meson ninja gtk4 sdl3
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    libgtk-4-dev \
+    libgdk-pixbuf2.0-dev \
+    libglib2.0-dev \
+    libcairo2-dev \
+    pkg-config \
+    libpango1.0-dev
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -S --needed \
+    base-devel \
+    gtk4 \
+    pango \
+    cairo \
+    gdk-pixbuf2 \
+    gcc \
+    pkgconf \
+    gtk4
+```
+
+### Fedora
+
+```bash
+sudo dnf install \
+    gtk4-devel \
+    gdk-pixbuf2-devel \
+    glib2-devel \
+    cairo-devel \
+    pango-devel \
+    gcc-c++ \
+    pkg-config
 ```
 
 ## Building
 
-1. Clone the repository
-2. Create a build directory and configure with Meson:
-
 ```bash
-meson setup build
+# Clone the repository
+git clone https://github.com/yourusername/nes83x-rs.git
+cd nes83x-rs
+
+# Build in release mode (recommended)
+cargo build --release
 ```
 
-3. Build the project:
+The binary will be available at `target/release/nes83x-rs`.
+
+## Running
 
 ```bash
-cd build
-ninja
-```
+# Run the emulator
+cargo run --release -- path/to/rom.nes
 
-4. Run the emulator:
-
-```bash
-./nes83x
-```
-
-## Running ROMs
-
-```bash
-./nes83x /path/to/rom.nes
+# For debugging
+RUST_LOG=debug cargo run -- --debug path/to/rom.nes
 ```
 
 ## Controls
@@ -56,6 +95,19 @@ ninja
 - **Shift**: Select
 - **Escape**: Quit
 
+## Project Structure
+
+- `src/cpu/`: 6502 CPU emulation
+- `src/nes/`: NES system emulation
+- `src/emulator/`: GTK4 UI and emulator frontend
+- `src/main.rs`: Entry point and command-line interface
+
 ## License
 
-MIT License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- [NESDev Wiki](https://wiki.nesdev.org) for detailed NES documentation
+- [OneLoneCoder NES emulator](https://github.com/OneLoneCoder/olcNES) for inspiration
+- [Rust NES Emulator](https://github.com/koute/pinky) for Rust implementation ideas
