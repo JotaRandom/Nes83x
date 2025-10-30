@@ -2,6 +2,8 @@
 
 A NES emulator written in Rust with GTK4 for the user interface.
 
+[Experimenting with the use of AI to create it entirely]
+
 ## Features
 
 ### CPU (6502) Implementation Status
