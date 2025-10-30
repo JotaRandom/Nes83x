@@ -1,11 +1,16 @@
 [package]
 name = "nes83x-rs"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A NES emulator written in Rust"
 authors = ["Your Name <your.email@example.com>"]
 license = "MIT"
 repository = "https://github.com/yourusername/nes83x-rs"
+
+[features]
+# Enable unofficial/illegal 6502 opcodes used in some NES games
+default = ["unofficial_ops"]
+unofficial_ops = []
 
 [dependencies]
 # GTK4 for the user interface
@@ -23,10 +28,13 @@ simplelog = "0.12"
 
 # Command-line argument parsing
 clap = { version = "4.0", features = ["derive"] }
+dialoguer = "0.11.0"
+console = "0.15.7"
 
 # Data structures and utilities
 bitflags = "2.0"
 bytemuck = { version = "1.0", features = ["derive"] }
+zip = "0.6.6"
 
 # For future use (audio, etc.)
 # rodio = "0.17"

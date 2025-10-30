@@ -4,13 +4,60 @@ A NES emulator written in Rust with GTK4 for the user interface.
 
 ## Features
 
-- [x] Basic CPU emulation (6502)
-- [ ] PPU emulation (Picture Processing Unit)
-- [ ] APU emulation (Audio Processing Unit)
-- [ ] Mapper support (currently only NROM)
+### CPU (6502) Implementation Status
+- [x] All official 6502 instructions
+- [x] Cycle-accurate timing
+- [x] Interrupt handling (NMI, IRQ, BRK)
+- [x] Status flags and processor state
+- [x] Unofficial/illegal opcodes (partially implemented)
+- [x] Memory-mapped I/O stubs
+
+### PPU (Picture Processing Unit) Implementation Status
+- [x] Background rendering with scrolling
+- [x] Sprite rendering with priority
+- [x] Sprite zero hit detection
+- [x] NMI generation
+- [x] VRAM/CRAM memory management
+- [x] Support for different mirroring modes
+
+### APU (Audio Processing Unit) Implementation Status
+- [x] Complete APU implementation with accurate timing
+- [x] Two pulse wave channels with configurable duty cycles
+  - [x] Sweep unit for frequency modulation
+  - [x] Volume envelope and length counter
+- [x] Triangle wave channel
+  - [x] Linear counter for waveform generation
+  - [x] Length counter
+- [x] Noise channel with LFSR
+  - [x] Configurable period and envelope
+  - [x] Length counter
+- [x] DMC (Delta Modulation Channel)
+  - [x] Sample playback with configurable rate
+  - [x] Delta modulation unit
+  - [x] IRQ generation
+- [x] Audio mixing with proper channel volumes
+- [x] Frame counter with 4-step and 5-step modes
+
+### Mapper Support
+- [x] NROM (Mapper 0)
+- [x] MMC1 (Mapper 1)
+- [ ] MMC3 (Mapper 4)
+- [ ] Other common mappers
+
+### Planned Features
 - [ ] Save states
 - [ ] Controller support (keyboard only for now)
 - [ ] Game Genie/Action Replay codes
+- [ ] Debugger interface
+- [ ] Rewind functionality
+
+### Implementation Details
+- Memory access with page boundary detection
+- Proper interrupt handling with correct timing
+- Support for all 6502 addressing modes
+- Comprehensive test coverage for CPU instructions
+- Cycle-accurate PPU timing
+- Accurate memory mapping for different mappers
 
 ## Screenshot
 

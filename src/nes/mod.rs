@@ -1,31 +1,50 @@
 //! NES system emulation
 
-use crate::cpu::{Cpu, Memory, CpuError};
+pub mod apu;
+pub mod cartridge;
+pub mod utils;
+pub mod cpu;
+pub mod input;
+pub mod mapper;
+pub mod ppu;
+
+use self::cpu::Cpu;
+use self::ppu::Ppu;
+use self::apu::Apu;
+use self::mapper::Mapper;
+use self::input::{InputManager, Button, Reset};
+
+// Re-export the Memory trait
+pub use crate::nes::utils::Memory;
+use std::io;
 use thiserror::Error;
 use std::path::Path;
 
 /// Represents the NES system
 pub struct Nes {
-    /// The CPU
+    /// The CPU (Central Processing Unit)
     pub cpu: Cpu,
     
     /// The PPU (Picture Processing Unit)
-    // ppu: Ppu,
+    pub ppu: Ppu,
     
     /// The APU (Audio Processing Unit)
-    // apu: Apu,
+    pub apu: Apu,
     
-    /// The cartridge (ROM)
-    // cart: Cartridge,
+    /// The cartridge (ROM) and mapper
+    pub cart: Option<Box<dyn Mapper>>,
     
     /// The system RAM (2KB + mirrors)
-    ram: [u8; 2048],
+    pub ram: [u8; 2048],
     
-    /// Controller states
-    controllers: [u8; 2],
+    /// Input manager for both controllers
+    pub input: InputManager,
     
     /// Whether the system is running
-    is_running: bool,
+    pub is_running: bool,
+    
+    /// Current cycle count (for timing)
+    pub cycle_count: u64,
 }
 
 /// Errors that can occur during NES operations
@@ -44,40 +63,119 @@ pub enum NesError {
     UnsupportedMapper(u8),
 }
 
+impl Memory for Nes {
+    /// Read a byte from memory
+    fn read_byte(&self, addr: u16) -> std::io::Result<u8> {
+        // Map the address to the appropriate memory region
+        match addr {
+            // RAM (mirrored every 2KB)
+            0x0000..=0x1FFF => Ok(self.ram[addr as usize & 0x07FF]),
+            
+            // PPU registers (mirrored every 8 bytes)
+            0x2000..=0x3FFF => {
+                let ppu_addr = 0x2000 + (addr & 0x0007);
+                self.ppu.read_register(ppu_addr)
+            }
+            
+            // APU and I/O registers
+            0x4000..=0x4017 => {
+                // For now, we'll just return 0 for APU/IO registers
+                // In a complete implementation, these would be handled by the APU
+                Ok(0)
+            }
+            
+            // APU and I/O functionality that is normally disabled
+            0x4018..=0x401F => {
+                // These addresses are normally unused but may be used by some mappers
+                Ok(0)
+            }
+            
+            // Cartridge space (PRG ROM, PRG RAM, and mapper registers)
+            0x4020..=0xFFFF => {
+                if let Some(ref cart) = self.cart {
+                    cart.read_prg_byte(addr)
+                } else {
+                    // If no cartridge is present, return 0xFF (open bus behavior)
+                    Ok(0xFF)
+                }
+            }
+        }
+    }
+    
+    /// Write a byte to memory
+    fn write_byte(&mut self, addr: u16, value: u8) -> std::io::Result<()> {
+        // Map the address to the appropriate memory region
+        match addr {
+            // RAM (mirrored every 2KB)
+            0x0000..=0x1FFF => {
+                self.ram[addr as usize & 0x07FF] = value;
+                Ok(())
+            }
+            
+            // PPU registers (mirrored every 8 bytes)
+            0x2000..=0x3FFF => {
+                let ppu_addr = 0x2000 + (addr & 0x0007);
+                self.ppu.write_register(ppu_addr, value)
+            }
+            
+            // APU and I/O registers
+            0x4000..=0x4017 => {
+                // For now, we'll ignore writes to APU/IO registers
+                // In a complete implementation, these would be handled by the APU
+                Ok(())
+            }
+            
+            // APU and I/O functionality that is normally disabled
+            0x4018..=0x401F => {
+                // These addresses are normally unused but may be used by some mappers
+                Ok(())
+            }
+            
+            // Cartridge space (PRG ROM, PRG RAM, and mapper registers)
+            0x4020..=0xFFFF => {
+                if let Some(ref mut cart) = self.cart {
+                    cart.write_prg_byte(addr, value)
+                } else {
+                    // If no cartridge is present, the write is ignored
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
 impl Nes {
     /// Create a new NES system
     pub fn new() -> Self {
         Nes {
             cpu: Cpu::new(),
-            // ppu: Ppu::new(),
-            // apu: Apu::new(),
-            // cart: Cartridge::empty(),
+            ppu: Ppu::new(),
+            apu: Apu::new(),
+            cart: None,
             ram: [0; 2048],
-            controllers: [0; 2],
+            input: InputManager::new(),
             is_running: false,
+            cycle_count: 0,
         }
     }
     
     /// Reset the NES to its initial state
     pub fn reset(&mut self) -> Result<(), NesError> {
-        // Reset CPU
         self.cpu.reset();
-        
-        // Reset PPU and APU
-        // self.ppu.reset();
-        // self.apu.reset();
-        
-        // Clear RAM
+        self.ppu.reset();
+        self.apu.reset();
         self.ram = [0; 2048];
         
-        // Reset controllers
-        self.controllers = [0; 2];
+        // Reset the input manager
+        self.input.reset();
         
-        // Set PC to reset vector
-        // let reset_vector = self.read_word(0xFFFC)?;
-        // self.cpu.reg.pc = reset_vector;
+        self.is_running = false;
+        self.cycle_count = 0;
         
-        self.is_running = true;
+        // Reset cartridge if present
+        if let Some(cart) = &mut self.cart {
+            cart.reset();
+        }
         
         Ok(())
     }
@@ -165,50 +263,57 @@ impl Nes {
             return Ok(());
         }
         
-        // Run CPU until we've simulated a full frame
-        // On NTSC, a frame is 29780.5 CPU cycles (approximately)
-        let target_cycles = 29780.5;
-        let mut cycles = 0.0;
+        // Run the CPU for one frame (approximately 29780 cycles at 1.79 MHz)
+        let target_cycles = 29780;
+        let mut cycles = 0;
         
         while cycles < target_cycles {
-            // Execute a single CPU instruction
+            // Execute one CPU instruction
             let cpu_cycles = self.cpu.step(self)?;
-            cycles += cpu_cycles as f64;
+            cycles += cpu_cycles as u32;
             
-            // TODO: Run PPU for the same number of cycles
-            // self.ppu.step(cpu_cycles * 3); // PPU runs at 3x CPU speed
+            // Run the PPU for the same number of cycles * 3 (PPU runs at 3x the CPU speed)
+            for _ in 0..(cpu_cycles * 3) {
+                let nmi = self.ppu.tick();
+                if nmi {
+                    self.cpu.nmi();
+                }
+            }
             
-            // TODO: Run APU
-            // self.apu.step(cpu_cycles);
+            // Run the APU for the same number of cycles
+            for _ in 0..cpu_cycles {
+                self.apu.tick(self);
+            }
             
-            // TODO: Handle NMI/IRQ
+            self.cycle_count += cpu_cycles as u64;
         }
         
-        // TODO: Update screen, handle input, etc.
+        // Handle controller input
+        self.update_controllers();
         
         Ok(())
     }
     
     /// Set the state of a controller button
-    pub fn set_button_state(&mut self, controller: usize, button: usize, pressed: bool) {
-        if controller < 2 && button < 8 {
-            if pressed {
-                self.controllers[controller] |= 1 << button;
-            } else {
-                self.controllers[controller] &= !(1 << button);
-            }
-        }
+    pub fn set_button_state(&mut self, controller: usize, button: Button, pressed: bool) {
+        self.input.set_button_state(controller, button, pressed);
     }
     
-    /// Read the current state of the controllers
+    /// Read the current state of a controller
     pub fn read_controller(&mut self, port: usize) -> u8 {
-        if port < 2 {
-            // For simplicity, we'll just return the current state
-            // In a real emulator, you'd implement proper controller strobe behavior
-            self.controllers[port]
-        } else {
-            0
-        }
+        self.input.read(port)
+    }
+    
+    /// Write to the controller port (strobe)
+    pub fn write_controller_strobe(&mut self, value: u8) {
+        self.input.write(value);
+    }
+    
+    /// Update the state of the controllers
+    fn update_controllers(&mut self) {
+        // The InputManager updates its state when write() or read() is called.
+        // This method is a placeholder for any additional controller updates
+        // that might be needed in the future.
     }
 }
 
@@ -218,31 +323,40 @@ impl Memory for Nes {
             // RAM (2KB mirrored)
             0x0000..=0x1FFF => Ok(self.ram[(addr & 0x07FF) as usize]),
             
-            // PPU registers
+            // PPU registers (mirrored every 8 bytes)
             0x2000..=0x3FFF => {
-                let reg = (addr & 0x0007) as u8;
-                // self.ppu.read_register(reg)
-                Ok(0) // Placeholder
+                let reg = (addr & 0x0007) as u16;
+                Ok(self.ppu.read_register(reg))
             }
             
             // APU and I/O registers
-            0x4000..=0x4017 => {
-                // self.apu.read_register(addr)
-                Ok(0) // Placeholder
+            0x4000..=0x4015 | 0x4017 => {
+                // Delegate to APU's read_byte method
+                self.apu.read_byte(addr)
             }
             
-            // APU and I/O functionality that is normally disabled
-            0x4018..=0x401F => Ok(0),
+            // Controller 1
+            0x4016 => Ok(self.input.read(0)),
             
-            // Cartridge space (PRG ROM, PRG RAM, and mapper registers)
-            0x4020..=0xFFFF => {
-                // self.cart.read_prg(addr)
-                Ok(0) // Placeholder
+            // Controller 2
+            0x4017 => Ok(self.input.read(1)),
+            
+            // PRG-ROM (32KB, potentially mirrored)
+            0x8000..=0xFFFF => {
+                if let Some(ref cart) = self.cart {
+                    Ok(cart.read_prg_byte(addr))
+                } else {
+                    // If no cartridge is loaded, return a default value (0xFF)
+                    Ok(0xFF)
+                }
             }
+            
+            // Unmapped memory
+            _ => Ok(0xFF),
         }
     }
     
-    fn write_byte(&mut self, addr: u16, value: u8) -> std::io::Result<()> {
+    fn write_byte(&mut self, addr: u16, value: u8) -> io::Result<()> {
         match addr {
             // RAM (2KB mirrored)
             0x0000..=0x1FFF => {
@@ -250,55 +364,50 @@ impl Memory for Nes {
                 Ok(())
             }
             
-            // PPU registers
+            // PPU registers (mirrored every 8 bytes)
             0x2000..=0x3FFF => {
-                let reg = (addr & 0x0007) as u8;
-                // self.ppu.write_register(reg, value)
-                Ok(()) // Placeholder
-            }
-            
-            // APU and I/O registers
-            0x4000..=0x4013 | 0x4015 | 0x4017 => {
-                // self.apu.write_register(addr, value)
-                Ok(()) // Placeholder
-            }
-            
-            // Controller registers
-            0x4016 | 0x4017 => {
-                // Handle controller strobe
-                // if value & 0x01 != 0 {
-                //     self.controller_strobe = true;
-                //     self.controller_shift[0] = self.controllers[0];
-                //     self.controller_shift[1] = self.controllers[1];
-                // } else {
-                //     self.controller_strobe = false;
-                // }
+                let reg = (addr & 0x0007) as u16;
+                self.ppu.write_register(reg, value);
                 Ok(())
             }
             
-            // APU and I/O functionality that is normally disabled
+            // OAM DMA
             0x4014 => {
-                // OAM DMA
                 // self.ppu.oam_dma(self, value);
                 Ok(())
             }
             
-            0x4018..=0x401F => Ok(()), // Unused
-            
-            // Cartridge space (PRG ROM, PRG RAM, and mapper registers)
-            0x4020..=0xFFFF => {
-                // self.cart.write_prg(addr, value)
-                Ok(()) // Placeholder
+            // Controller register 1
+            0x4016 => {
+                // Handle controller 1 input
+                self.input.write(value);
+                Ok(())
             }
+            
+            // APU and I/O registers
+            0x4000..=0x4013 | 0x4015 | 0x4017 => {
+                // Delegate to APU's write_byte method
+                self.apu.write_byte(addr, value)
+            }
+            
+            // PRG-ROM (read-only)
+            0x8000..=0xFFFF => {
+                // ROM is read-only, but some mappers might handle writes
+                // For now, just ignore writes to ROM
+                Ok(())
+            }
+            
+            // Unmapped memory
+            _ => Ok(()),
         }
     }
+    
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    
+
     #[test]
     fn test_nes_reset() {
         let mut nes = Nes::new();

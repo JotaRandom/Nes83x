@@ -1,15 +1,50 @@
-//! 6502 CPU emulation for the NES
+//! # 6502 CPU Emulation for the NES
+//! 
+//! This module implements a cycle-accurate emulation of the Ricoh 2A03/2A07 CPU,
+//! which is a variant of the MOS Technology 6502 microprocessor used in the NES.
+//! 
+//! ## Key Features
+//! - Full implementation of all 56 official 6502 instructions
+//! - Support for unofficial/illegal opcodes used in some NES games (enabled with `unofficial_ops` feature)
+//! - Cycle-accurate timing for correct emulation speed
+//! - Proper interrupt handling (NMI, IRQ, BRK)
+//! - Memory-mapped I/O for communication with PPU, APU, and controllers
 
 use bitflags::bitflags;
 use thiserror::Error;
-use std::fmt;
 use std::io;
+
+
+// Include the unofficial opcodes module
+#[cfg(feature = "unofficial_ops")]
+mod unofficial;
+
+// Re-export unofficial opcodes when the feature is enabled
+#[cfg(feature = "unofficial_ops")]
+pub use unofficial::*;
+
+// Re-export the Memory trait
+pub use crate::nes::utils::Memory;
 
 /// Represents the result of a memory access operation
 pub type CpuResult<T> = Result<T, CpuError>;
 
 bitflags! {
-    /// CPU Status Register (P) flags
+    /// # CPU Status Register (P) Flags
+    ///
+    /// The status register contains 7 flags that indicate the current state of the CPU.
+    /// The 5th bit is unused but always set to 1 when pushed to the stack.
+    ///
+    /// | Bit | Mask | Name       | Description                                      |
+    /// |-----|------|------------|--------------------------------------------------|
+    /// | 7   | 0x80 | NEGATIVE   | Set when the result is negative (bit 7 is set)    |
+    /// | 6   | 0x40 | OVERFLOW   | Set when signed arithmetic overflows             |
+    /// | 5   | 0x20 | UNUSED     | Not used, always 1 when pushed to stack          |
+    /// | 4   | 0x10 | BREAK      | Set when a BRK instruction was executed          |
+    /// | 3   | 0x08 | DECIMAL    | Enables decimal mode (not used in NES)           |
+    /// | 2   | 0x04 | INTERRUPT  | When set, disables maskable interrupts (IRQ)     |
+    /// | 1   | 0x02 | ZERO       | Set when the result is zero                      |
+    /// | 0   | 0x01 | CARRY      | Set when an operation results in a carry/borrow  |
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct StatusFlags: u8 {
         /// Carry Flag
@@ -31,7 +66,18 @@ bitflags! {
     }
 }
 
-/// Represents the 6502 CPU registers
+/// # 6502 CPU Registers
+///
+/// The 6502 has three general-purpose 8-bit registers (A, X, Y),
+/// a program counter (PC), stack pointer (S), and a status register (P).
+///
+/// ## Register Descriptions:
+/// - `a`: Accumulator - Main register for arithmetic and logic operations
+/// - `x`: X Index - General purpose register, often used for counters/offsets
+/// - `y`: Y Index - General purpose register, similar to X but with some addressing mode differences
+/// - `s`: Stack Pointer - 8-bit register that points to the next available location on the hardware stack (page 1: 0x0100-0x01FF)
+/// - `p`: Status Register - 8-bit register containing processor flags (see StatusFlags)
+/// - `pc`: Program Counter - 16-bit register pointing to the next instruction to execute
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Registers {
     /// Accumulator
@@ -48,7 +94,22 @@ pub struct Registers {
     pub p: StatusFlags,
 }
 
-/// Represents the 6502 CPU
+/// # 6502 CPU Emulator
+///
+/// This struct emulates the behavior of the 6502 CPU used in the NES.
+/// It maintains the CPU's internal state including registers, program counter,
+/// stack pointer, and various status flags.
+///
+/// ## Key Components:
+/// - `reg`: Contains all CPU registers (A, X, Y, P, S, PC)
+/// - `cycles`: Tracks the number of cycles executed (used for timing)
+/// - `nmi_pending`: Indicates if a Non-Maskable Interrupt is pending
+/// - `irq_pending`: Indicates if a standard Interrupt Request is pending
+/// - `is_running`: Tracks if the CPU is currently executing instructions
+///
+/// The CPU communicates with other NES components (PPU, APU, controllers)
+/// through memory-mapped I/O in the 0x2000-0x401F range.
+#[derive(Debug)]
 pub struct Cpu {
     /// CPU registers
     pub reg: Registers,
@@ -60,6 +121,9 @@ pub struct Cpu {
     pub irq_pending: bool,
     /// Whether the CPU is in a valid state
     pub is_running: bool,
+    
+    /// Memory bus reference
+    memory: Box<dyn Memory>,
 }
 
 /// Errors that can occur during CPU operations
@@ -88,25 +152,50 @@ pub enum CpuError {
 }
 
 impl Cpu {
-    /// Create a new CPU instance
+    /// Creates a new CPU instance with default values
+    ///
+    /// Initializes the CPU to its power-on state:
+    /// - All registers set to zero
+    /// - Stack pointer initialized to 0xFD (typical boot value)
+    /// - Status flags set to 0x34 (Interrupt Disable and Break flags set)
+    /// - Program counter will be set by the reset vector
+    /// - All interrupt flags cleared
+    /// - CPU marked as not running
+    /// - Memory initialized with a default implementation
     pub fn new() -> Self {
+        use crate::nes::utils::MemoryBlock;
+        
+        // Create a default memory block (can be replaced with actual memory later)
+        let default_memory = vec![0u8; 0x10000]; // 64KB of memory
+        let memory = Box::new(MemoryBlock::new(default_memory.leak()));
+        
         Cpu {
             reg: Registers {
                 a: 0,
                 x: 0,
                 y: 0,
                 s: 0xFD, // Default stack pointer
-                pc: 0,
+                pc: 0, // Will be set by the NES
                 p: StatusFlags::UNUSED | StatusFlags::INTERRUPT_DISABLE,
             },
             cycles: 0,
             nmi_pending: false,
             irq_pending: false,
             is_running: false,
+            memory,
         }
     }
     
-    /// Reset the CPU to its initial state
+    /// Resets the CPU to its initial state
+    /// 
+    /// This method initializes all CPU registers to their power-on state:
+    /// - A, X, Y registers set to 0
+    /// - Stack pointer set to 0xFD
+    /// - Program counter will be set by the reset vector
+    /// - Status flags set to 0x34 (Interrupt Disable and Break flags set)
+    /// - All interrupt flags cleared
+    /// - CPU marked as running
+    /// - Memory is preserved
     pub fn reset(&mut self) {
         self.reg = Registers {
             a: 0,
@@ -122,67 +211,203 @@ impl Cpu {
         self.is_running = true;
     }
     
-    /// Reset the CPU to its initial state
-    pub fn reset(&mut self) {
-        self.reg = Registers {
-            a: 0,
-            x: 0,
-            y: 0,
-            s: 0xFD,
-            pc: 0, // Will be set by the NES
-            p: StatusFlags::UNUSED | StatusFlags::INTERRUPT_DISABLE,
-        };
-        self.cycles = 0;
-        self.nmi_pending = false;
-        self.irq_pending = false;
-        self.is_running = true;
-    }
-    
-    /// Trigger a non-maskable interrupt (NMI)
+    /// Triggers a non-maskable interrupt (NMI)
     pub fn trigger_nmi(&mut self) {
         self.nmi_pending = true;
     }
     
-    /// Trigger an interrupt request (IRQ)
+    /// Alias for trigger_nmi() for compatibility with external code
+    pub fn nmi(&mut self) {
+        self.trigger_nmi();
+    }
+    
+    /// Triggers an interrupt request (IRQ)
     pub fn trigger_irq(&mut self) {
         if !self.reg.p.contains(StatusFlags::INTERRUPT_DISABLE) {
             self.irq_pending = true;
         }
     }
     
-    /// Execute a single CPU instruction
+    /// Executes a single CPU instruction
+    ///
+    /// This is the main CPU execution loop that:
+    /// 1. Handles any pending interrupts (NMI has highest priority)
+    /// 2. Fetches the next opcode from memory
+    /// 3. Decodes and executes the instruction
+    /// 4. Updates the cycle counter
+    ///
+    /// # Arguments
+    /// * `memory` - The memory interface for reading/writing
+    ///
+    /// # Returns
+    /// The number of cycles the instruction took to execute
+    ///
+    /// # Errors
+    /// Returns `CpuError` if an invalid opcode is encountered or memory access fails
     pub fn step(&mut self, memory: &mut impl Memory) -> Result<u32, CpuError> {
         if !self.is_running {
             return Err(CpuError::InvalidState);
         }
         
-        // Handle pending interrupts
+        // Handle pending NMI (highest priority)
         if self.nmi_pending {
-            self.handle_interrupt(memory, 0xFFFA)?;
             self.nmi_pending = false;
-            self.cycles += 7;
-            return Ok(7);
-        } else if self.irq_pending {
-            self.handle_interrupt(memory, 0xFFFE)?;
+            let cycles = self.handle_interrupt(memory, 0xFFFA, false)?;
+            self.cycles += cycles as u32;
+            return Ok(cycles as u32);
+        }
+        
+        // Handle pending IRQ (if interrupts are enabled)
+        if self.irq_pending && !self.reg.p.contains(StatusFlags::INTERRUPT_DISABLE) {
             self.irq_pending = false;
-            self.cycles += 7;
-            return Ok(7);
+            let cycles = self.handle_interrupt(memory, 0xFFFE, false)?;
+            self.cycles += cycles as u32;
+            return Ok(cycles as u32);
         }
         
         // Fetch and execute instruction
         let opcode = self.read_byte(memory, self.reg.pc)?;
-        self.reg.pc = self.reg.pc.wrapping_add(1);
         
-        // Execute the instruction (stub implementation)
-        let cycles = self.execute_instruction(opcode, memory)?;
+        // For BRK instruction, we need to handle it specially
+        let cycles = if opcode == 0x00 {  // BRK
+            // BRK is a 2-byte instruction, but the PC is incremented by 2
+            self.reg.pc = self.reg.pc.wrapping_add(1);
+            self.handle_interrupt(memory, 0xFFFE, true)?
+        } else {
+            // Normal instruction execution
+            self.reg.pc = self.reg.pc.wrapping_add(1);
+            self.execute_instruction(opcode, memory)?
+        };
+        
         self.cycles += cycles as u32;
-        
         Ok(cycles as u32)
     }
     
     /// Execute a single CPU instruction (internal implementation)
+    /// 
+    /// # Arguments
+    /// * `opcode` - The opcode to execute
+    /// * `memory` - The memory interface to use for memory operations
+    /// 
+    /// # Returns
+    /// The number of cycles the instruction took to execute, or an error if the opcode is invalid
     fn execute_instruction(&mut self, opcode: u8, memory: &mut impl Memory) -> CpuResult<u8> {
         match opcode {
+            // Unofficial opcodes (enabled with the 'unofficial_ops' feature)
+            #[cfg(feature = "unofficial_ops")]
+            0x0B | 0x2B => self.aac(memory),  // AAC (ANC)
+            #[cfg(feature = "unofficial_ops")]
+            0x8B => self.ane(memory),         // ANE (XAA)
+            #[cfg(feature = "unofficial_ops")]
+            0x6B => self.arr(memory),         // ARR
+            #[cfg(feature = "unofficial_ops")]
+            0xA7 | 0xB7 | 0xAF | 0xBF | 0xA3 | 0xB3 => {
+                let mode = match opcode {
+                    0xA7 => AddressingMode::ZeroPage,
+                    0xB7 => AddressingMode::ZeroPageY,
+                    0xAF => AddressingMode::Absolute,
+                    0xBF => AddressingMode::AbsoluteY,
+                    0xA3 => AddressingMode::IndirectX,
+                    0xB3 => AddressingMode::IndirectY,
+                    _ => unreachable!(),
+                };
+                self.lax(mode, memory)  // LAX
+            }
+            #[cfg(feature = "unofficial_ops")]
+            0x87 | 0x97 | 0x8F | 0x83 => {
+                let mode = match opcode {
+                    0x87 => AddressingMode::ZeroPage,
+                    0x97 => AddressingMode::ZeroPageY,
+                    0x8F => AddressingMode::Absolute,
+                    0x83 => AddressingMode::IndirectX,
+                    _ => unreachable!(),
+                };
+                self.sax(mode, memory)  // SAX
+            }
+            #[cfg(feature = "unofficial_ops")]
+            0x07 | 0x17 | 0x0F | 0x1F | 0x1B | 0x03 | 0x13 => {
+                let mode = match opcode {
+                    0x07 => AddressingMode::ZeroPage,
+                    0x17 => AddressingMode::ZeroPageX,
+                    0x0F => AddressingMode::Absolute,
+                    0x1F => AddressingMode::AbsoluteX,
+                    0x1B => AddressingMode::AbsoluteY,
+                    0x03 => AddressingMode::IndirectX,
+                    0x13 => AddressingMode::IndirectY,
+                    _ => unreachable!(),
+                };
+                self.slo(mode, memory)  // SLO (ASO)
+            }
+            #[cfg(feature = "unofficial_ops")]
+            0x27 | 0x37 | 0x2F | 0x3F | 0x3B | 0x23 | 0x33 => {
+                let mode = match opcode {
+                    0x27 => AddressingMode::ZeroPage,
+                    0x37 => AddressingMode::ZeroPageX,
+                    0x2F => AddressingMode::Absolute,
+                    0x3F => AddressingMode::AbsoluteX,
+                    0x3B => AddressingMode::AbsoluteY,
+                    0x23 => AddressingMode::IndirectX,
+                    0x33 => AddressingMode::IndirectY,
+                    _ => unreachable!(),
+                };
+                self.rla(mode, memory)  // RLA
+            }
+            #[cfg(feature = "unofficial_ops")]
+            0x47 | 0x57 | 0x4F | 0x5F | 0x5B | 0x43 | 0x53 => {
+                let mode = match opcode {
+                    0x47 => AddressingMode::ZeroPage,
+                    0x57 => AddressingMode::ZeroPageX,
+                    0x4F => AddressingMode::Absolute,
+                    0x5F => AddressingMode::AbsoluteX,
+                    0x5B => AddressingMode::AbsoluteY,
+                    0x43 => AddressingMode::IndirectX,
+                    0x53 => AddressingMode::IndirectY,
+                    _ => unreachable!(),
+                };
+                self.sre(mode, memory)  // SRE (LSE)
+            }
+            #[cfg(feature = "unofficial_ops")]
+            0x67 | 0x77 | 0x6F | 0x7F | 0x7B | 0x63 | 0x73 => {
+                let mode = match opcode {
+                    0x67 => AddressingMode::ZeroPage,
+                    0x77 => AddressingMode::ZeroPageX,
+                    0x6F => AddressingMode::Absolute,
+                    0x7F => AddressingMode::AbsoluteX,
+                    0x7B => AddressingMode::AbsoluteY,
+                    0x63 => AddressingMode::IndirectX,
+                    0x73 => AddressingMode::IndirectY,
+                    _ => unreachable!(),
+                };
+                self.rra(mode, memory)  // RRA
+            }
+            #[cfg(feature = "unofficial_ops")]
+            0xC7 | 0xD7 | 0xCF | 0xDF | 0xDB | 0xC3 | 0xD3 => {
+                let mode = match opcode {
+                    0xC7 => AddressingMode::ZeroPage,
+                    0xD7 => AddressingMode::ZeroPageX,
+                    0xCF => AddressingMode::Absolute,
+                    0xDF => AddressingMode::AbsoluteX,
+                    0xDB => AddressingMode::AbsoluteY,
+                    0xC3 => AddressingMode::IndirectX,
+                    0xD3 => AddressingMode::IndirectY,
+                    _ => unreachable!(),
+                };
+                self.dcp(mode, memory)  // DCP
+            }
+            #[cfg(feature = "unofficial_ops")]
+            0xE7 | 0xF7 | 0xEF | 0xFF | 0xFB | 0xE3 | 0xF3 => {
+                let mode = match opcode {
+                    0xE7 => AddressingMode::ZeroPage,
+                    0xF7 => AddressingMode::ZeroPageX,
+                    0xEF => AddressingMode::Absolute,
+                    0xFF => AddressingMode::AbsoluteX,
+                    0xFB => AddressingMode::AbsoluteY,
+                    0xE3 => AddressingMode::IndirectX,
+                    0xF3 => AddressingMode::IndirectY,
+                    _ => unreachable!(),
+                };
+                self.isc(mode, memory)  // ISC (ISB)
+            }
             // Load/Store Operations
             0xA9 => self.lda(AddressingMode::Immediate, memory),    // LDA Immediate
             0xA5 => self.lda(AddressingMode::ZeroPage, memory),     // LDA Zero Page
@@ -375,7 +600,7 @@ impl Cpu {
             0xEA => Ok(2),                                                            // NOP
             
             // Unofficial/Illegal Opcodes (stubs for now)
-            0x0B | 0x2B => self.aac(opcode, memory),                                  // AAC (ANC)
+            0x0B | 0x2B => self.aac(memory),                                      // AAC (ANC)
             0x8B => self.ane(memory),                                                 // ANE (XAA)
             0x4B => self.asr(memory),                                                 // ASR (ALR)
             0x6B => self.arr(memory),                                                 // ARR
@@ -385,16 +610,6 @@ impl Cpu {
                 self.stp(),                                                          // STP (KIL)
             0xBB => self.las(memory),                                                 // LAS (LAX)
             0xA7 => self.lax(AddressingMode::ZeroPage, memory),                      // LAX Zero Page
-            0xB7 => self.lax(AddressingMode::ZeroPageY, memory),                     // LAX Zero Page,Y
-            0xAF => self.lax(AddressingMode::Absolute, memory),                      // LAX Absolute
-            0xBF => self.lax(AddressingMode::AbsoluteY, memory),                     // LAX Absolute,Y
-            0xA3 => self.lax(AddressingMode::IndirectX, memory),                     // LAX (Indirect,X)
-            0xB3 => self.lax(AddressingMode::IndirectY, memory),                     // LAX (Indirect),Y
-            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => self.nop(memory),                    // NOP (skips a byte)
-            0x04 | 0x44 | 0x64 => self.nop(memory),                                  // NOP Zero Page
-            0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => self.nop(memory),            // NOP Zero Page,X
-            0x0C => self.nop(memory),                                                // NOP Absolute
-            0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => self.nop(memory),            // NOP Absolute,X
             0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => self.nop(memory),            // NOP Implied
             0x27 => self.rla(AddressingMode::ZeroPage, memory),                      // RLA Zero Page
             0x37 => self.rla(AddressingMode::ZeroPageX, memory),                     // RLA Zero Page,X
@@ -449,21 +664,58 @@ impl Cpu {
                 // Treat as a 1-byte NOP for compatibility
                 Ok(1)
             }
+        }
     }
     
-    /// Handle an interrupt
-    fn handle_interrupt(&mut self, memory: &mut impl Memory, vector: u16) -> Result<(), CpuError> {
-        // Push PC and status register to stack
-        self.push_word(memory, self.reg.pc)?;
-        self.push_byte(memory, self.reg.p.bits() | StatusFlags::BREAK.bits() | StatusFlags::UNUSED.bits())?;
+    /// Handle an interrupt request (NMI, IRQ, or BRK)
+    /// 
+    /// This method handles the common interrupt sequence:
+    /// 1. Push PC high byte
+    /// 2. Push PC low byte
+    /// 3. Push status register with B flag cleared
+    /// 4. Set I flag (except for BRK)
+    /// 5. Jump to the interrupt vector
+    /// 
+    /// # Arguments
+    /// * `memory` - The memory interface
+    /// * `vector` - The address of the interrupt vector
+    /// * `is_brk` - Whether this is a BRK instruction (affects B flag and PC adjustment)
+    /// 
+    /// # Returns
+    /// Number of cycles used (7 for NMI/IRQ, 7 for BRK)
+    fn handle_interrupt(&mut self, memory: &mut impl Memory, vector: u16, is_brk: bool) -> CpuResult<u8> {
+        // For BRK, the PC points to the next instruction (PC + 2)
+        let pc = if is_brk {
+            self.reg.pc.wrapping_add(1)
+        } else {
+            self.reg.pc
+        };
         
-        // Set interrupt disable flag
-        self.reg.p.insert(StatusFlags::INTERRUPT_DISABLE);
+        // Push PC and status to stack (high byte first)
+        self.push_byte(memory, (pc >> 8) as u8)?;
+        self.push_byte(memory, pc as u8)?;
         
-        // Set PC to interrupt vector
+        // Push status with Break flag set for BRK, cleared otherwise
+        let mut status = self.reg.p;
+        if is_brk {
+            status.insert(StatusFlags::BREAK);
+        } else {
+            status.remove(StatusFlags::BREAK);
+        }
+        // Always set the unused bit when pushing to stack
+        status.insert(StatusFlags::UNUSED);
+        self.push_byte(memory, status.bits())?;
+        
+        // Set interrupt disable flag (except for BRK which already has it set)
+        if !is_brk {
+            self.reg.p.insert(StatusFlags::INTERRUPT_DISABLE);
+        }
+        
+        // Read the new PC from the interrupt vector
         self.reg.pc = memory.read_word(vector)?;
         
-        Ok(())
+        // Interrupts take 7 cycles
+        Ok(7)
     }
     
     // =============================================
@@ -471,7 +723,11 @@ impl Cpu {
     // =============================================
     
     /// Get the address for the specified addressing mode
-    /// Returns (address, page_crossed, cycles)
+    /// Returns (address, page_crossed, extra_cycles)
+    /// 
+    /// - address: The resolved memory address
+    /// - page_crossed: Whether a page boundary was crossed (for cycle counting)
+    /// - extra_cycles: Number of additional cycles needed (0 or 1 for page crossing)
     fn get_operand_address(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<(u16, bool, u8)> {
         match mode {
             AddressingMode::Implied => Ok((0, false, 0)),
@@ -482,39 +738,45 @@ impl Cpu {
                 Ok((addr, false, 0))
             },
             AddressingMode::ZeroPage => {
-                let addr = memory.read_byte(self.reg.pc)? as u16;
+                let addr = self.read_byte(memory, self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 Ok((addr, false, 0))
             },
             AddressingMode::ZeroPageX => {
-                let base = memory.read_byte(self.reg.pc)? as u16;
+                let base = self.read_byte(memory, self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
-                let addr = base.wrapping_add(self.reg.x as u16) & 0x00FF;
+                let addr = base.wrapping_add(self.reg.x as u16) & 0x00FF; // Wrap around in zero page
+                // No page crossing possible in zero page
                 Ok((addr, false, 0))
             },
             AddressingMode::ZeroPageY => {
-                let base = memory.read_byte(self.reg.pc)? as u16;
+                let base = self.read_byte(memory, self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
-                let addr = base.wrapping_add(self.reg.y as u16) & 0x00FF;
+                let addr = base.wrapping_add(self.reg.y as u16) & 0x00FF; // Wrap around in zero page
+                // No page crossing possible in zero page
                 Ok((addr, false, 0))
             },
             AddressingMode::Absolute => {
-                let addr = memory.read_word(self.reg.pc)?;
+                let addr = self.read_word(memory, self.reg.pc)?;
                 self.reg.pc = self.reg.pc.wrapping_add(2);
                 Ok((addr, false, 0))
             },
             AddressingMode::AbsoluteX => {
-                let base = memory.read_word(self.reg.pc)?;
+                let base = self.read_word(memory, self.reg.pc)?;
                 self.reg.pc = self.reg.pc.wrapping_add(2);
                 let addr = base.wrapping_add(self.reg.x as u16);
+                // Page crossing occurs if the high byte changes
                 let page_crossed = (base & 0xFF00) != (addr & 0xFF00);
+                // Return 1 extra cycle if page was crossed
                 Ok((addr, page_crossed, if page_crossed { 1 } else { 0 }))
             },
             AddressingMode::AbsoluteY => {
-                let base = memory.read_word(self.reg.pc)?;
+                let base = self.read_word(memory, self.reg.pc)?;
                 self.reg.pc = self.reg.pc.wrapping_add(2);
                 let addr = base.wrapping_add(self.reg.y as u16);
+                // Page crossing occurs if the high byte changes
                 let page_crossed = (base & 0xFF00) != (addr & 0xFF00);
+                // Return 1 extra cycle if page was crossed
                 Ok((addr, page_crossed, if page_crossed { 1 } else { 0 }))
             },
             AddressingMode::Indirect => {
@@ -533,21 +795,29 @@ impl Cpu {
                 Ok(((hi << 8) | lo, false, 0))
             },
             AddressingMode::IndirectX => {
-                let base = memory.read_byte(self.reg.pc)? as u8;
+                let base = self.read_byte(memory, self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
-                let ptr = base.wrapping_add(self.reg.x);
-                let lo = memory.read_byte(ptr as u16)? as u16;
-                let hi = memory.read_byte(ptr.wrapping_add(1) as u16)? as u16;
-                Ok(((hi << 8) | lo, false, 0))
+                // Wrap around in zero page for the pointer
+                let ptr = base.wrapping_add(self.reg.x as u16) & 0x00FF;
+                // Read the low byte
+                let lo = self.read_byte(memory, ptr)? as u16;
+                // Read the high byte (wrap around in zero page)
+                let hi = self.read_byte(memory, (ptr + 1) & 0x00FF)? as u16;
+                let addr = (hi << 8) | lo;
+                // No page crossing penalty for indirect X
+                Ok((addr, false, 0))
             },
             AddressingMode::IndirectY => {
-                let base = memory.read_byte(self.reg.pc)? as u8;
+                let base = self.read_byte(memory, self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
-                let lo = memory.read_byte(base as u16)? as u16;
-                let hi = memory.read_byte(base.wrapping_add(1) as u16)? as u16;
-                let deref_base = (hi << 8) | lo;
-                let addr = deref_base.wrapping_add(self.reg.y as u16);
-                let page_crossed = (deref_base & 0xFF00) != (addr & 0xFF00);
+                // Read the 16-bit address from zero page (wraps around in page 0)
+                let lo = self.read_byte(memory, base & 0x00FF)? as u16;
+                let hi = self.read_byte(memory, (base + 1) & 0x00FF)? as u16;
+                let deref = (hi << 8) | lo;
+                let addr = deref.wrapping_add(self.reg.y as u16);
+                // Page crossing occurs if the addition of Y crosses a page boundary
+                let page_crossed = (deref & 0xFF00) != (addr & 0xFF00);
+                // Return 1 extra cycle if page was crossed
                 Ok((addr, page_crossed, if page_crossed { 1 } else { 0 }))
             },
             AddressingMode::Relative => {
@@ -557,6 +827,22 @@ impl Cpu {
                 Ok((addr, false, 0))
             },
         }
+    }
+    
+    // =============================================
+    // Flag Operations
+    // =============================================
+    
+    /// Updates the Zero and Negative flags based on the given value
+    /// 
+    /// # Arguments
+    /// * `value` - The value to check for zero/negative
+    pub(crate) fn update_zero_and_negative_flags(&mut self, value: u8) {
+        // Set zero flag if the result is zero
+        self.reg.p.set(StatusFlags::ZERO, value == 0);
+        
+        // Set negative flag if bit 7 is set
+        self.reg.p.set(StatusFlags::NEGATIVE, (value & 0x80) != 0);
     }
     
     // =============================================
@@ -586,65 +872,67 @@ impl Cpu {
         Ok((hi << 8) | lo)
     }
     
-    // =============================================
-    // Flag Operations
-    // =============================================
-    
-    fn update_zero_and_negative_flags(&mut self, result: u8) {
-        self.reg.p.set(StatusFlags::ZERO, result == 0);
-        self.reg.p.set(StatusFlags::NEGATIVE, (result & 0x80) != 0);
-    }
-    
-    fn set_overflow_flag(&mut self, a: u8, b: u8, result: u8) {
-        // Overflow occurs if the sign of both inputs is the same and different from the result
-        let overflow = ((a ^ result) & (b ^ result) & 0x80) != 0;
-        self.reg.p.set(StatusFlags::OVERFLOW, overflow);
-    }
-    
-    // =============================================
-    // Arithmetic and Logic Operations
-    // =============================================
-    
     /// ADC - Add with Carry
+    /// 
+    /// This instruction adds the contents of a memory location to the accumulator together with the carry bit.
+    /// If overflow occurs the carry bit is set, this enables multiple byte addition to be performed.
     fn adc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
         let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
-        let value = if matches!(mode, AddressingMode::Immediate) {
-            addr as u8
-        } else {
-            memory.read_byte(addr)?
+        let value = memory.read_byte(addr)?;
+        
+        self.adc_impl(value)?;
+        
+        // Base cycles + extra cycles for page crossing
+        let base_cycles = match mode {
+            AddressingMode::Immediate => 2,
+            AddressingMode::ZeroPage => 3,
+            AddressingMode::ZeroPageX => 4,
+            AddressingMode::Absolute => 4,
+            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4,
+            AddressingMode::IndirectX => 6,
+            AddressingMode::IndirectY => 5,
+            _ => return Err(CpuError::InvalidAddressingMode(mode)),
         };
         
+        Ok(base_cycles + extra_cycles as u8)
+    }
+    
+    /// Internal implementation of ADC operation
+    /// 
+    /// This is a helper method that performs the actual ADC operation and updates the flags.
+    /// It's used by both the regular ADC instruction and by other instructions that need to perform
+    /// addition with carry (like SBC with the carry flag inverted).
+    /// 
+    /// # Arguments
+    /// * `value` - The value to add to the accumulator
+    /// 
+    /// # Returns
+    /// The number of cycles the operation took (1 for the internal operation)
+    fn adc_impl(&mut self, value: u8) -> CpuResult<u8> {
         let carry = if self.reg.p.contains(StatusFlags::CARRY) { 1 } else { 0 };
         let sum = self.reg.a as u16 + value as u16 + carry;
         
         // Set carry flag if sum > 255
         self.reg.p.set(StatusFlags::CARRY, sum > 0xFF);
         
-        // Set overflow flag if sign bit is incorrect
+        // Set overflow flag if the sign of the result is different from both operands
         let result = sum as u8;
-        self.set_overflow_flag(self.reg.a, value, result);
+        let overflow = ((self.reg.a ^ result) & (value ^ result) & 0x80) != 0;
+        self.reg.p.set(StatusFlags::OVERFLOW, overflow);
         
+        // Update accumulator and flags
         self.reg.a = result;
         self.update_zero_and_negative_flags(self.reg.a);
         
-        // Base cycles + extra cycles for page crossing
-        Ok(match mode {
-            AddressingMode::Immediate => 2,
-            AddressingMode::ZeroPage => 3,
-            AddressingMode::ZeroPageX => 4,
-            AddressingMode::Absolute => 4,
-            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4 + extra_cycles,
-            AddressingMode::IndirectX => 6,
-            AddressingMode::IndirectY => 5 + extra_cycles,
-            _ => return Err(CpuError::InvalidAddressingMode(mode)),
-        })
+        Ok(1)  // Base cycles (additional cycles handled by the caller)
     }
+    
     
     /// SBC - Subtract with Carry
     fn sbc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
         // SBC is the same as ADC with the operand's bits inverted
         // and the carry flag treated as inverted
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+        let (addr, _page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -659,24 +947,28 @@ impl Cpu {
         // Set carry flag if sum > 255 (same as ADC)
         self.reg.p.set(StatusFlags::CARRY, sum > 0xFF);
         
-        // Set overflow flag if sign bit is incorrect
+        // Set overflow flag if the sign of the result is different from both operands
         let result = sum as u8;
-        self.set_overflow_flag(self.reg.a, !value, result);
+        let overflow = ((self.reg.a ^ result) & ((!value) ^ result) & 0x80) != 0;
+        self.reg.p.set(StatusFlags::OVERFLOW, overflow);
         
         self.reg.a = result;
         self.update_zero_and_negative_flags(self.reg.a);
         
-        // Same cycle counts as ADC
-        Ok(match mode {
+        // Calculate base cycles based on addressing mode
+        let base_cycles = match mode {
             AddressingMode::Immediate => 2,
             AddressingMode::ZeroPage => 3,
             AddressingMode::ZeroPageX => 4,
             AddressingMode::Absolute => 4,
-            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4 + extra_cycles,
+            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4,
             AddressingMode::IndirectX => 6,
-            AddressingMode::IndirectY => 5 + extra_cycles,
+            AddressingMode::IndirectY => 5,
             _ => return Err(CpuError::InvalidAddressingMode(mode)),
-        })
+        };
+        
+        // Add extra cycle if page boundary was crossed
+        Ok(base_cycles + extra_cycles as u8)
     }
     
     /// AND - Logical AND
@@ -792,7 +1084,7 @@ impl Cpu {
     
     /// Common compare logic used by CMP, CPX, CPY
     fn compare_register(&mut self, mode: AddressingMode, register: u8, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+        let (addr, _page_crossed, _extra_cycles) = self.get_operand_address(mode, memory)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -1053,13 +1345,9 @@ impl Cpu {
             AddressingMode::ZeroPageX => 6,
             AddressingMode::Absolute => 6,
             AddressingMode::AbsoluteX => 7,
-            _ => return Err(CpuError::InvalidAddressingMode(mode)),
+            _ => 0, // This should never happen as other modes are not valid for ROR
         })
     }
-    
-    // =============================================
-    // Load/Store Operations
-    // =============================================
     
     /// LDA - Load Accumulator
     fn lda(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
@@ -1221,8 +1509,70 @@ impl Cpu {
     }
     
     // =============================================
-    // Stack Operations
+    // Unofficial/Illegal Opcodes
     // =============================================
+    
+    /// Arithmetic Shift Right (ASR/ALR)
+    /// Performs a logical AND between the accumulator and a value from memory,
+    /// then shifts the result right by one bit.
+    fn alr(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
+        let value = memory.read_byte(self.reg.pc).map_err(CpuError::MemoryError)?;
+        self.reg.pc = self.reg.pc.wrapping_add(1);
+        let result = self.reg.a & value;
+        let carry = (result & 0x01) != 0;
+        let result = result >> 1;
+        
+        self.reg.a = result;
+        self.reg.p.set(StatusFlags::CARRY, carry);
+        self.reg.p.set(StatusFlags::ZERO, result == 0);
+        self.reg.p.set(StatusFlags::NEGATIVE, (result & 0x80) != 0);
+        
+        Ok(2)  // Base cycles
+    }
+    
+    /// ASR/ALR instruction (alias for alr, as they're the same operation)
+    pub fn asr(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
+        let value = memory.read_byte(self.reg.pc).map_err(CpuError::MemoryError)?;
+        self.reg.pc = self.reg.pc.wrapping_add(1);
+        let result = self.reg.a & value;
+        let carry = (result & 0x01) != 0;
+        let result = result >> 1;
+        
+        self.reg.a = result;
+        self.reg.p.set(StatusFlags::CARRY, carry);
+        self.reg.p.set(StatusFlags::ZERO, result == 0);
+        self.reg.p.set(StatusFlags::NEGATIVE, (result & 0x80) != 0);
+        
+        Ok(2)  // Base cycles
+    }
+    
+    /// XAS (SHX) - AND X register with the high byte of the target address + 1
+    /// then AND with A, store in memory
+    /// This is an undocumented instruction with inconsistent behavior across 6502 variants
+    pub fn xas(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+        
+        // The exact behavior varies between CPU revisions
+        // This is a common implementation that works for most cases
+        let value = self.reg.x & self.reg.a & ((addr >> 8) as u8).wrapping_add(1);
+        
+        // Write the result to memory
+        memory.write_byte(addr, value)?;
+        
+        // Update flags
+        self.update_zero_and_negative_flags(value);
+        
+        // Return cycle count (base + page crossing penalty if any)
+        match mode {
+            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => Ok(5 + extra_cycles),
+            _ => Ok(5),
+        }
+    }
+    
+    // Placeholder for other unimplemented unofficial opcodes
+    fn nop(&mut self, _memory: &mut impl Memory) -> CpuResult<u8> {
+        Ok(2) // Default 2 cycles for NOP
+    }
     
     /// PHA - Push Accumulator
     fn pha(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
@@ -1254,12 +1604,6 @@ impl Cpu {
         self.reg.p.insert(StatusFlags::UNUSED);
         Ok(4)
     }
-        
-        // Jump to interrupt vector
-        self.reg.pc = self.read_word(memory, vector)?;
-        
-        Ok(())
-    }
     
     // Helper methods for memory access
     fn read_byte(&self, memory: &impl Memory, addr: u16) -> Result<u8, CpuError> {
@@ -1270,15 +1614,15 @@ impl Cpu {
         memory.write_byte(addr, value).map_err(CpuError::MemoryError)
     }
     
-    fn read_word(&self, memory: &impl Memory, addr: u16) -> Result<u16, Result<u16, CpuError>> {
-        let lo = self.read_byte(memory, addr).map_err(Err)?;
-        let hi = self.read_byte(memory, addr.wrapping_add(1)).map_err(Err)?;
+    fn read_word(&self, memory: &impl Memory, addr: u16) -> CpuResult<u16> {
+        let lo = self.read_byte(memory, addr)?;
+        let hi = self.read_byte(memory, addr.wrapping_add(1))?;
         Ok(u16::from_le_bytes([lo, hi]))
     }
     
     fn push_byte(&mut self, memory: &mut impl Memory, value: u8) -> Result<(), CpuError> {
         let addr = 0x0100 | (self.reg.s as u16);
-        self.write_byte(memory, addr, value)?;
+        memory.write_byte(addr, value).map_err(CpuError::MemoryError)?;
         self.reg.s = self.reg.s.wrapping_sub(1);
         Ok(())
     }
@@ -1390,10 +1734,21 @@ impl Cpu {
         Ok(6)
     }
     
-    fn update_zero_and_negative_flags(&mut self, result: u8) {
-        self.reg.p.set(StatusFlags::ZERO, result == 0);
-        self.reg.p.set(StatusFlags::NEGATIVE, (result & 0x80) != 0);
+}
+
+// Implement Memory trait for Cpu to allow direct memory access
+impl Memory for Cpu {
+    fn read_byte(&self, addr: u16) -> std::io::Result<u8> {
+        // Delegate to the memory bus
+        self.memory.read_byte(addr)
     }
+    
+    fn write_byte(&mut self, addr: u16, value: u8) -> std::io::Result<()> {
+        // Delegate to the memory bus
+        self.memory.write_byte(addr, value)
+    }
+    
+    // Use the default implementations for read_word and write_word from the Memory trait
 }
 
 /// Addressing modes for the 6502 CPU
@@ -1412,29 +1767,6 @@ pub enum AddressingMode {
     IndirectX,
     IndirectY,
     Relative,
-}
-
-/// Trait for memory access
-pub trait Memory {
-    /// Read a byte from memory
-    fn read_byte(&self, addr: u16) -> io::Result<u8>;
-    
-    /// Write a byte to memory
-    fn write_byte(&mut self, addr: u16, value: u8) -> io::Result<()>;
-    
-    /// Read a word (little-endian) from memory
-    fn read_word(&self, addr: u16) -> io::Result<u16> {
-        let lo = self.read_byte(addr)? as u16;
-        let hi = self.read_byte(addr.wrapping_add(1))? as u16;
-        Ok((hi << 8) | lo)
-    }
-    
-    /// Write a word (little-endian) to memory
-    fn write_word(&mut self, addr: u16, value: u16) -> io::Result<()> {
-        let [lo, hi] = value.to_le_bytes();
-        self.write_byte(addr, lo)?;
-        self.write_byte(addr.wrapping_add(1), hi)
-    }
 }
 
 #[cfg(test)]
