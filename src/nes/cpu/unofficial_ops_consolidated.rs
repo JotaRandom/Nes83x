@@ -2,7 +2,7 @@ use super::{Cpu, CpuResult, CpuError, AddressingMode};
 use super::status_flags::StatusFlags;
 use crate::nes::utils::Memory;
 
-impl Cpu {
+impl<M: Memory> Cpu<M> {
     // =============================================
     // Flag Operations (from unofficial_ops.rs)
     // =============================================

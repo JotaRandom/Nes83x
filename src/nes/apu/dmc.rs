@@ -240,6 +240,11 @@ impl Dmc {
     pub fn output(&self) -> u8 {
         self.output_level
     }
+    
+    /// Check if an IRQ is pending
+    pub fn is_irq_pending(&self) -> bool {
+        self.irq_pending
+    }
 }
 
 #[cfg(test)]

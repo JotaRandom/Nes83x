@@ -76,46 +76,60 @@ pub struct Cpu<M: Memory> {
     /// Whether the CPU is in a valid state
     pub is_running: bool,
     /// Memory bus reference
-    memory: M,
+    pub memory: M,
 }
 
 use crate::nes::utils::MemoryError;
 
+use std::fmt;
+
 /// Errors that can occur during CPU operations
-#[derive(Error, Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CpuError {
+    /// Invalid opcode encountered
     #[error("Invalid opcode: {0:02X}")]
     InvalidOpcode(u8),
     
+    /// Memory access error
+    #[error("Memory error: {0}")]
+    MemoryError(#[from] crate::nes::utils::MemoryError),
+    
+    /// I/O error
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    
+    /// CPU is in an invalid state
     #[error("CPU is in an invalid state")]
     InvalidState,
     
-    #[error("Memory error: {0}")]
-    MemoryError(#[from] MemoryError),
-    
+    /// Invalid addressing mode
     #[error("Invalid addressing mode: {0:?}")]
     InvalidAddressingMode(AddressingMode),
     
+    /// Invalid memory access at address
     #[error("Invalid memory access at address: {0:04X}")]
     InvalidMemoryAccess(u16),
     
+    /// Stack overflow
     #[error("Stack overflow")]
     StackOverflow,
     
+    /// Stack underflow
     #[error("Stack underflow")]
     StackUnderflow,
-    
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
-impl From<MemoryError> for CpuError {
-    fn from(error: MemoryError) -> Self {
-        CpuError::MemoryError(error)
+impl std::error::Error for CpuError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CpuError::MemoryError(e) => Some(e),
+            CpuError::Io(e) => Some(e),
+            _ => None,
+        }
     }
 }
 
-impl Cpu {
+impl<M: Memory> Cpu<M> {
     /// Creates a new CPU instance with default values
     ///
     /// Initializes the CPU to its power-on state:
@@ -217,7 +231,7 @@ impl Cpu {
         if self.nmi_pending {
             self.nmi_pending = false;
             let cycles = self.handle_interrupt(nes, 0xFFFA, false)?;
-            self.cycles += cycles as u32;
+            self.cycles += cycles as u64;
             return Ok(cycles as u32);
         }
         
@@ -225,12 +239,12 @@ impl Cpu {
         if self.irq_pending && !self.reg.p.contains(StatusFlags::INTERRUPT_DISABLE) {
             self.irq_pending = false;
             let cycles = self.handle_interrupt(nes, 0xFFFE, false)?;
-            self.cycles += cycles as u32;
+            self.cycles += cycles as u64;
             return Ok(cycles as u32);
         }
         
         // Fetch and execute instruction
-        let opcode = self.read_byte(nes, self.reg.pc)?;
+        let opcode = nes.read_byte(self.reg.pc)?;
         
         // For BRK instruction, we need to handle it specially
         let cycles = if opcode == 0x00 {  // BRK
@@ -652,7 +666,7 @@ impl Cpu {
     /// 
     /// # Returns
     /// Number of cycles used (7 for NMI/IRQ, 7 for BRK)
-    fn handle_interrupt(&mut self, memory: &mut impl Memory, vector: u16, is_brk: bool) -> CpuResult<u8> {
+    fn handle_interrupt(&mut self, nes: &mut crate::nes::Nes, vector: u16, is_brk: bool) -> CpuResult<u8> {
         // For BRK, the PC points to the next instruction (PC + 2)
         let pc = if is_brk {
             self.reg.pc.wrapping_add(1)
@@ -661,8 +675,8 @@ impl Cpu {
         };
         
         // Push PC and status to stack (high byte first)
-        self.push_byte(memory, (pc >> 8) as u8)?;
-        self.push_byte(memory, pc as u8)?;
+        self.push_byte(nes, (pc >> 8) as u8)?;
+        self.push_byte(nes, pc as u8)?;
         
         // Push status with Break flag set for BRK, cleared otherwise
         let mut status = self.reg.p;
@@ -673,7 +687,7 @@ impl Cpu {
         }
         // Always set the unused bit when pushing to stack
         status.insert(StatusFlags::UNUSED);
-        self.push_byte(memory, status.bits())?;
+        self.push_byte(nes, status.bits())?;
         
         // Set interrupt disable flag (except for BRK which already has it set)
         if !is_brk {
@@ -681,7 +695,7 @@ impl Cpu {
         }
         
         // Read the new PC from the interrupt vector
-        self.reg.pc = memory.read_word(vector)?;
+        self.reg.pc = nes.read_word(vector)?;
         
         // Interrupts take 7 cycles
         Ok(7)
@@ -697,7 +711,7 @@ impl Cpu {
     /// - address: The resolved memory address
     /// - page_crossed: Whether a page boundary was crossed (for cycle counting)
     /// - extra_cycles: Number of additional cycles needed (0 or 1 for page crossing)
-    fn get_operand_address(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<(u16, bool, u8)> {
+    fn get_operand_address(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<(u16, bool, u8)> {
         match mode {
             AddressingMode::Implied => Ok((0, false, 0)),
             AddressingMode::Accumulator => Ok((0, false, 0)),
@@ -707,31 +721,31 @@ impl Cpu {
                 Ok((addr, false, 0))
             },
             AddressingMode::ZeroPage => {
-                let addr = self.read_byte(memory, self.reg.pc)? as u16;
+                let addr = nes.read_byte(self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 Ok((addr, false, 0))
             },
             AddressingMode::ZeroPageX => {
-                let base = self.read_byte(memory, self.reg.pc)? as u16;
+                let base = nes.read_byte(self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 let addr = base.wrapping_add(self.reg.x as u16) & 0x00FF; // Wrap around in zero page
                 // No page crossing possible in zero page
                 Ok((addr, false, 0))
             },
             AddressingMode::ZeroPageY => {
-                let base = self.read_byte(memory, self.reg.pc)? as u16;
+                let base = nes.read_byte(self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 let addr = base.wrapping_add(self.reg.y as u16) & 0x00FF; // Wrap around in zero page
                 // No page crossing possible in zero page
                 Ok((addr, false, 0))
             },
             AddressingMode::Absolute => {
-                let addr = self.read_word(memory, self.reg.pc)?;
+                let addr = nes.read_word(self.reg.pc)?;
                 self.reg.pc = self.reg.pc.wrapping_add(2);
                 Ok((addr, false, 0))
             },
             AddressingMode::AbsoluteX => {
-                let base = self.read_word(memory, self.reg.pc)?;
+                let base = nes.read_word(self.reg.pc)?;
                 self.reg.pc = self.reg.pc.wrapping_add(2);
                 let addr = base.wrapping_add(self.reg.x as u16);
                 // Page crossing occurs if the high byte changes
@@ -740,7 +754,7 @@ impl Cpu {
                 Ok((addr, page_crossed, if page_crossed { 1 } else { 0 }))
             },
             AddressingMode::AbsoluteY => {
-                let base = self.read_word(memory, self.reg.pc)?;
+                let base = nes.read_word(self.reg.pc)?;
                 self.reg.pc = self.reg.pc.wrapping_add(2);
                 let addr = base.wrapping_add(self.reg.y as u16);
                 // Page crossing occurs if the high byte changes
@@ -749,39 +763,39 @@ impl Cpu {
                 Ok((addr, page_crossed, if page_crossed { 1 } else { 0 }))
             },
             AddressingMode::Indirect => {
-                let ptr = memory.read_word(self.reg.pc)?;
+                let ptr = nes.read_word(self.reg.pc)?;
                 self.reg.pc = self.reg.pc.wrapping_add(2);
                 
                 // Handle 6502 page boundary bug
-                let lo = memory.read_byte(ptr)? as u16;
+                let lo = nes.read_byte(ptr)? as u16;
                 let hi_ptr = if (ptr & 0x00FF) == 0x00FF {
                     ptr & 0xFF00
                 } else {
                     ptr.wrapping_add(1)
                 };
-                let hi = memory.read_byte(hi_ptr)? as u16;
+                let hi = nes.read_byte(hi_ptr)? as u16;
                 
                 Ok(((hi << 8) | lo, false, 0))
             },
             AddressingMode::IndirectX => {
-                let base = self.read_byte(memory, self.reg.pc)? as u16;
+                let base = nes.read_byte(self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 // Wrap around in zero page for the pointer
                 let ptr = base.wrapping_add(self.reg.x as u16) & 0x00FF;
                 // Read the low byte
-                let lo = self.read_byte(memory, ptr)? as u16;
+                let lo = nes.read_byte(ptr)? as u16;
                 // Read the high byte (wrap around in zero page)
-                let hi = self.read_byte(memory, (ptr + 1) & 0x00FF)? as u16;
+                let hi = nes.read_byte((ptr + 1) & 0x00FF)? as u16;
                 let addr = (hi << 8) | lo;
                 // No page crossing penalty for indirect X
                 Ok((addr, false, 0))
             },
             AddressingMode::IndirectY => {
-                let base = self.read_byte(memory, self.reg.pc)? as u16;
+                let base = nes.read_byte(self.reg.pc)? as u16;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 // Read the 16-bit address from zero page (wraps around in page 0)
-                let lo = self.read_byte(memory, base & 0x00FF)? as u16;
-                let hi = self.read_byte(memory, (base + 1) & 0x00FF)? as u16;
+                let lo = nes.read_byte(base & 0x00FF)? as u16;
+                let hi = nes.read_byte((base + 1) & 0x00FF)? as u16;
                 let deref = (hi << 8) | lo;
                 let addr = deref.wrapping_add(self.reg.y as u16);
                 // Page crossing occurs if the addition of Y crosses a page boundary
@@ -790,7 +804,7 @@ impl Cpu {
                 Ok((addr, page_crossed, if page_crossed { 1 } else { 0 }))
             },
             AddressingMode::Relative => {
-                let offset = memory.read_byte(self.reg.pc)? as i8;
+                let offset = nes.read_byte(self.reg.pc)? as i8;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 let addr = self.reg.pc.wrapping_add(offset as u16);
                 Ok((addr, false, 0))
@@ -820,14 +834,14 @@ impl Cpu {
     
     // push_byte and push_word implementations are now only at the bottom of the file
     
-    fn pull_byte(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
+    fn pull_byte(&mut self, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
         self.reg.s = self.reg.s.wrapping_add(1);
-        memory.read_byte(0x0100 | (self.reg.s as u16)).map_err(Into::into)
+        nes.read_byte(0x0100 | (self.reg.s as u16)).map_err(Into::into)
     }
     
-    fn pull_word(&mut self, memory: &mut impl Memory) -> CpuResult<u16> {
-        let lo = self.pull_byte(memory)? as u16;
-        let hi = self.pull_byte(memory)? as u16;
+    fn pull_word(&mut self, nes: &mut crate::nes::Nes) -> CpuResult<u16> {
+        let lo = self.pull_byte(nes)? as u16;
+        let hi = self.pull_byte(nes)? as u16;
         Ok((hi << 8) | lo)
     }
     
@@ -835,9 +849,9 @@ impl Cpu {
     /// 
     /// This instruction adds the contents of a memory location to the accumulator together with the carry bit.
     /// If overflow occurs the carry bit is set, this enables multiple byte addition to be performed.
-    fn adc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
+    fn adc(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?;
         
         self.adc_impl(value)?;
         
@@ -888,14 +902,14 @@ impl Cpu {
     
     
     /// SBC - Subtract with Carry
-    fn sbc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
+    fn sbc(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
         // SBC is the same as ADC with the operand's bits inverted
         // and the carry flag treated as inverted
-        let (addr, _page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+        let (addr, _page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
-            memory.read_byte(addr)?
+            nes.read_byte(addr)?
         };
         
         // Invert the bits of the value and use ADC logic
@@ -931,12 +945,12 @@ impl Cpu {
     }
     
     /// AND - Logical AND
-    fn and(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn and(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
-            memory.read_byte(addr)?
+            nes.read_byte(addr)?
         };
         
         self.reg.a &= value;
@@ -956,12 +970,12 @@ impl Cpu {
     }
     
     /// EOR - Exclusive OR
-    fn eor(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn eor(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
-            memory.read_byte(addr)?
+            nes.read_byte(addr)?
         };
         
         self.reg.a ^= value;
@@ -981,12 +995,12 @@ impl Cpu {
     }
     
     /// ORA - Logical Inclusive OR
-    fn ora(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn ora(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
-            memory.read_byte(addr)?
+            nes.read_byte(addr)?
         };
         
         self.reg.a |= value;
@@ -1006,9 +1020,9 @@ impl Cpu {
     }
     
     /// BIT - Bit Test
-    fn bit(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
+    fn bit(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?;
         
         // Set zero flag if (A & value) == 0
         self.reg.p.set(StatusFlags::ZERO, (self.reg.a & value) == 0);
@@ -1027,28 +1041,24 @@ impl Cpu {
     }
     
     /// CMP - Compare Accumulator
-    fn cmp(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        self.compare_register(mode, self.reg.a, memory)
+    fn cmp(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        self.compare_register(mode, self.reg.a, nes)
     }
     
     /// CPX - Compare X Register
-    fn cpx(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        self.compare_register(mode, self.reg.x, memory)
+    fn cpx(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        self.compare_register(mode, self.reg.x, nes)
     }
     
     /// CPY - Compare Y Register
-    fn cpy(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        self.compare_register(mode, self.reg.y, memory)
+    fn cpy(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        self.compare_register(mode, self.reg.y, nes)
     }
     
     /// Common compare logic used by CMP, CPX, CPY
-    fn compare_register(&mut self, mode: AddressingMode, register: u8, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _page_crossed, _extra_cycles) = self.get_operand_address(mode, memory)?;
-        let value = if matches!(mode, AddressingMode::Immediate) {
-            addr as u8
-        } else {
-            memory.read_byte(addr)?
-        };
+    fn compare_register(&mut self, mode: AddressingMode, register: u8, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _page_crossed, _extra_cycles) = self.get_operand_address(mode, nes)?;
+        let value = if matches!(mode, AddressingMode::Immediate) { addr as u8 } else { nes.read_byte(addr)? };
         
         // Compare is like SBC but doesn't store the result
         let result = register.wrapping_sub(value);
@@ -1073,10 +1083,10 @@ impl Cpu {
     // =============================================
     
     /// INC - Increment Memory
-    fn inc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?.wrapping_add(1);
-        memory.write_byte(addr, value)?;
+    fn inc(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?.wrapping_add(1);
+        nes.write_byte(addr, value)?;
         self.update_zero_and_negative_flags(value);
         
         Ok(match mode {
@@ -1103,10 +1113,10 @@ impl Cpu {
     }
     
     /// DEC - Decrement Memory
-    fn dec(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?.wrapping_sub(1);
-        memory.write_byte(addr, value)?;
+    fn dec(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?.wrapping_sub(1);
+        nes.write_byte(addr, value)?;
         self.update_zero_and_negative_flags(value);
         
         Ok(match mode {
@@ -1151,16 +1161,16 @@ impl Cpu {
     }
     
     /// ASL - Arithmetic Shift Left (Memory)
-    fn asl(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
+    fn asl(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?;
         
         // Set carry to bit 7 of value
         self.reg.p.set(StatusFlags::CARRY, (value & 0x80) != 0);
         
         // Shift left and write back
         let result = value.wrapping_shl(1);
-        memory.write_byte(addr, result)?;
+        nes.write_byte(addr, result)?;
         
         // Update flags
         self.update_zero_and_negative_flags(result);
@@ -1190,16 +1200,16 @@ impl Cpu {
     }
     
     /// LSR - Logical Shift Right (Memory)
-    fn lsr(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
+    fn lsr(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?;
         
         // Set carry to bit 0 of value
         self.reg.p.set(StatusFlags::CARRY, (value & 0x01) != 0);
         
         // Shift right and write back
         let result = value.wrapping_shr(1);
-        memory.write_byte(addr, result)?;
+        nes.write_byte(addr, result)?;
         
         // Update flags (bit 7 is always 0 after LSR)
         self.reg.p.set(StatusFlags::NEGATIVE, false);
@@ -1234,9 +1244,9 @@ impl Cpu {
     }
     
     /// ROL - Rotate Left (Memory)
-    fn rol(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
+    fn rol(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?;
         let old_carry = self.reg.p.contains(StatusFlags::CARRY);
         
         // Set carry to bit 7 of value
@@ -1247,7 +1257,7 @@ impl Cpu {
         if old_carry {
             result |= 0x01;
         }
-        memory.write_byte(addr, result)?;
+        nes.write_byte(addr, result)?;
         
         // Update flags
         self.update_zero_and_negative_flags(result);
@@ -1281,9 +1291,9 @@ impl Cpu {
     }
     
     /// ROR - Rotate Right (Memory)
-    fn ror(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
+    fn ror(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        let value = nes.read_byte(addr)?;
         let old_carry = self.reg.p.contains(StatusFlags::CARRY);
         
         // Set carry to bit 0 of value
@@ -1294,7 +1304,7 @@ impl Cpu {
         if old_carry {
             result |= 0x80;
         }
-        memory.write_byte(addr, result)?;
+        nes.write_byte(addr, result)?;
         
         // Update flags
         self.update_zero_and_negative_flags(result);
@@ -1309,12 +1319,12 @@ impl Cpu {
     }
     
     /// LDA - Load Accumulator
-    fn lda(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn lda(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
-            memory.read_byte(addr)?
+            nes.read_byte(addr)?
         };
         
         self.reg.a = value;
@@ -1334,12 +1344,12 @@ impl Cpu {
     }
     
     /// LDX - Load X Register
-    fn ldx(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn ldx(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
-            memory.read_byte(addr)?
+            nes.read_byte(addr)?
         };
         
         self.reg.x = value;
@@ -1357,12 +1367,12 @@ impl Cpu {
     }
     
     /// LDY - Load Y Register
-    fn ldy(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn ldy(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, nes)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
-            memory.read_byte(addr)?
+            nes.read_byte(addr)?
         };
         
         self.reg.y = value;
@@ -1380,9 +1390,9 @@ impl Cpu {
     }
     
     /// STA - Store Accumulator
-    fn sta(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        memory.write_byte(addr, self.reg.a)?;
+    fn sta(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        nes.write_byte(addr, self.reg.a)?;
         
         Ok(match mode {
             AddressingMode::ZeroPage => 3,
@@ -1396,9 +1406,9 @@ impl Cpu {
     }
     
     /// STX - Store X Register
-    fn stx(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        memory.write_byte(addr, self.reg.x)?;
+    fn stx(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        nes.write_byte(addr, self.reg.x)?;
         
         Ok(match mode {
             AddressingMode::ZeroPage => 3,
@@ -1409,9 +1419,9 @@ impl Cpu {
     }
     
     /// STY - Store Y Register
-    fn sty(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        memory.write_byte(addr, self.reg.y)?;
+    fn sty(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
+        let (addr, _, _) = self.get_operand_address(mode, nes)?;
+        nes.write_byte(addr, self.reg.y)?;
         
         Ok(match mode {
             AddressingMode::ZeroPage => 3,
@@ -1509,35 +1519,35 @@ impl Cpu {
         Ok(6)
     }
     
-    fn push_byte(&mut self, memory: &mut impl Memory, value: u8) -> Result<(), CpuError> {
+    fn push_byte(&mut self, nes: &mut crate::nes::Nes, value: u8) -> Result<(), CpuError> {
         let addr = 0x0100 | (self.reg.s as u16);
         memory.write_byte(addr, value).map_err(CpuError::MemoryError)?;
         self.reg.s = self.reg.s.wrapping_sub(1);
         Ok(())
     }
     
-    fn push_word(&mut self, memory: &mut impl Memory, value: u16) -> Result<(), CpuError> {
+    fn push_word(&mut self, nes: &mut crate::nes::Nes, value: u16) -> Result<(), CpuError> {
         let [hi, lo] = value.to_be_bytes();
         self.push_byte(memory, hi)?;
         self.push_byte(memory, lo)?;
         Ok(())
     }
     
-    fn pop_byte(&mut self, memory: &mut impl Memory) -> Result<u8, CpuError> {
+    fn pop_byte(&mut self, nes: &mut crate::nes::Nes) -> Result<u8, CpuError> {
         self.reg.s = self.reg.s.wrapping_add(1);
         let addr = 0x0100 | (self.reg.s as u16);
-        self.read_byte(memory, addr)
+        nes.read_byte(addr).map_err(Into::into)
     }
     
-    fn pop_word(&mut self, memory: &mut impl Memory) -> Result<u16, CpuError> {
-        let lo = self.pop_byte(memory)? as u16;
-        let hi = self.pop_byte(memory)? as u16;
+    fn pop_word(&mut self, nes: &mut crate::nes::Nes) -> Result<u16, CpuError> {
+        let lo = self.pop_byte(nes)? as u16;
+        let hi = self.pop_byte(nes)? as u16;
         Ok((hi << 8) | lo)
     }
     
     // Helper methods for flag operations
     /// Execute a branch instruction
-    fn branch(&mut self, condition: bool, memory: &mut impl Memory) -> CpuResult<u8> {
+    fn branch(&mut self, condition: bool, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
         if !condition {
             // If branch not taken, just skip the offset byte
             self.reg.pc = self.reg.pc.wrapping_add(1);
@@ -1545,7 +1555,7 @@ impl Cpu {
         }
         
         // Read the offset (signed 8-bit value)
-        let offset = self.read_byte(memory, self.reg.pc)? as i8;
+        let offset = nes.read_byte(self.reg.pc)? as i8;
         let old_pc = self.reg.pc;
         
         // Calculate new PC (takes 1 extra cycle if branch is taken)
@@ -1576,27 +1586,27 @@ impl Cpu {
     /// 
     /// # Errors
     /// Returns `CpuError` if the addressing mode is invalid or memory access fails
-    fn jmp(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
+    fn jmp(&mut self, mode: AddressingMode, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
         match mode {
             AddressingMode::Absolute => {
                 // Read the 16-bit address
-                let addr = self.read_word(memory, self.reg.pc)?;
+                let addr = nes.read_word(self.reg.pc)?;
                 self.reg.pc = addr;
                 Ok(3)
             },
             AddressingMode::Indirect => {
                 // Read the 16-bit address of the target address
-                let addr = self.read_word(memory, self.reg.pc)?;
+                let addr = nes.read_word(self.reg.pc)?;
                 
                 // Handle the 6502 page boundary bug
                 let addr_indirect = if (addr & 0x00FF) == 0x00FF {
                     // If the low byte is 0xFF, the high byte is read from the same page
-                    let lo = self.read_byte(memory, addr)? as u16;
-                    let hi = self.read_byte(memory, addr & 0xFF00)? as u16;
+                    let lo = nes.read_byte(addr + 1)? as u16;
+                    let hi = nes.read_byte(addr & 0xFF00)? as u16;
                     (hi << 8) | lo
                 } else {
                     // Normal case - read 16-bit value
-                    self.read_word(memory, addr)?
+                    nes.read_word(addr)?
                 };
                 
                 self.reg.pc = addr_indirect;

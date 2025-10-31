@@ -269,7 +269,7 @@ impl Memory for Apu {
                 }
                 
                 // DMC IRQ flag
-                if self.dmc.irq_pending {
+                if self.dmc.is_irq_pending() {
                     status |= 0x80;
                 }
                 

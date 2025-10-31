@@ -4,11 +4,15 @@ pub mod apu;
 pub mod cartridge;
 pub mod utils;
 pub mod cpu;
+pub mod cpu_memory;
 pub mod input;
 pub mod mapper;
 pub mod ppu;
 
-use self::cpu::Cpu;
+use self::cpu::{Cpu, CpuError};
+use self::cpu_memory::CpuMemory;
+use std::sync::Arc;
+use std::sync::Mutex;
 use self::ppu::Ppu;
 use self::apu::Apu;
 use self::mapper::Mapper;
@@ -24,7 +28,7 @@ use std::path::Path;
 #[derive(Debug)]
 pub struct Nes {
     /// The CPU (Central Processing Unit)
-    pub cpu: Cpu,
+    pub cpu: Cpu<CpuMemory>,
     
     /// The PPU (Picture Processing Unit)
     pub ppu: Ppu,
@@ -33,7 +37,7 @@ pub struct Nes {
     pub apu: Apu,
     
     /// The cartridge (ROM) and mapper
-    pub cart: Option<Box<dyn Mapper>>,
+    pub cart: Option<Box<dyn Mapper + Send + Sync>>,
     
     /// The system RAM (2KB + mirrors)
     pub ram: [u8; 2048],
@@ -46,6 +50,9 @@ pub struct Nes {
     
     /// Current cycle count (for timing)
     pub cycle_count: u64,
+    
+    /// CPU memory wrapper (stored separately to avoid circular references)
+    cpu_memory: CpuMemory,
 }
 
 /// Errors that can occur during NES operations
@@ -69,7 +76,8 @@ pub enum NesError {
 impl Nes {
     /// Create a new NES system
     pub fn new() -> Self {
-        Nes {
+        // Create a new NES with uninitialized CPU memory
+        let mut nes = Nes {
             cpu: Cpu::new(),
             ppu: Ppu::new(),
             apu: Apu::new(),
@@ -78,7 +86,20 @@ impl Nes {
             input: InputManager::new(),
             is_running: false,
             cycle_count: 0,
-        }
+            cpu_memory: CpuMemory::new(ptr::null_mut()),
+        };
+        
+        // Now that we have a stable address, create CpuMemory with a pointer to self
+        let ptr = &mut nes as *mut _ as *mut dyn Memory;
+        nes.cpu_memory = CpuMemory::new(ptr);
+        
+        // Update the CPU's memory reference
+        nes.cpu.memory = nes.cpu_memory.clone();
+        
+        // Reset the system to initialize everything properly
+        let _ = nes.reset();
+        
+        nes
     }
     
     /// Reset the NES to its initial state
@@ -248,41 +269,41 @@ impl Nes {
 }
 
 impl Memory for Nes {
-    fn read_byte(&self, addr: u16) -> std::io::Result<u8> {
+    fn read_byte(&self, addr: u16) -> Result<u8, crate::nes::utils::MemoryError> {
         match addr {
             // RAM (2KB mirrored)
             0x0000..=0x1FFF => Ok(self.ram[(addr & 0x07FF) as usize]),
             
             // PPU registers (mirrored every 8 bytes)
             0x2000..=0x3FFF => {
+                use crate::nes::ppu::Ppu;
                 let reg = (addr & 0x0007) as u16;
-                // Create a mutable reference to PPU for reading registers
-                let ppu: &mut ppu::Ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                // Safe because we know ppu is valid for the lifetime of self
+                let ppu: &mut Ppu = unsafe { &mut *(&self.ppu as *const Ppu as *mut Ppu) };
                 Ok(ppu.read_register(reg))
             }
             
             // APU and I/O registers
             0x4000..=0x4015 | 0x4017 => {
-                // Create a mutable reference to APU for reading registers
-                let apu: &mut apu::Apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
+                use crate::nes::apu::Apu;
+                // Safe because we know apu is valid for the lifetime of self
+                let apu: &Apu = unsafe { &*(&self.apu as *const Apu) };
+                // APU read_byte returns a Result<u8, MemoryError>
                 apu.read_byte(addr)
             }
             
             // Controller 1
             0x4016 => {
-                let input: &mut input::Input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                use crate::nes::input::InputManager;
+                // Safe because we know input is valid for the lifetime of self
+                let input: &mut InputManager = unsafe { &mut *(&self.input as *const InputManager as *mut InputManager) };
                 Ok(input.read(0))
-            }
-            
-            // Controller 2
-            0x4017 => {
-                let input: &mut input::Input = unsafe { &mut *((&self.input as *const _) as *mut _) };
-                Ok(input.read(1))
             }
             
             // PRG-ROM (32KB, potentially mirrored)
             0x8000..=0xFFFF => {
                 if let Some(ref cart) = self.cart {
+                    // read_prg_byte returns a u8 directly
                     Ok(cart.read_prg_byte(addr))
                 } else {
                     // If no cartridge is loaded, return a default value (0xFF)
@@ -291,11 +312,11 @@ impl Memory for Nes {
             }
             
             // Unmapped memory
-            _ => Ok(0xFF),
+            _ => Ok(0xFF), // Default value for unmapped memory
         }
     }
     
-    fn write_byte(&mut self, addr: u16, value: u8) -> io::Result<()> {
+    fn write_byte(&mut self, addr: u16, value: u8) -> Result<(), crate::nes::utils::MemoryError> {
         match addr {
             // RAM (2KB mirrored)
             0x0000..=0x1FFF => {
@@ -305,9 +326,10 @@ impl Memory for Nes {
             
             // PPU registers (mirrored every 8 bytes)
             0x2000..=0x3FFF => {
+                use crate::nes::ppu::Ppu;
                 let reg = (addr & 0x0007) as u16;
-                // Create a mutable reference to PPU for writing registers
-                let ppu: &mut ppu::Ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                // Safe because we know ppu is valid for the lifetime of self
+                let ppu: &mut Ppu = unsafe { &mut *(&self.ppu as *const Ppu as *mut Ppu) };
                 ppu.write_register(reg, value);
                 Ok(())
             }
@@ -315,24 +337,25 @@ impl Memory for Nes {
             // OAM DMA
             0x4014 => {
                 // TODO: Implement OAM DMA
-                // let ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
-                // ppu.oam_dma(self, value);
                 Ok(())
             }
             
             // Controller register 1
             0x4016 => {
-                // Create a mutable reference to input for writing
-                let input: &mut input::Input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                use crate::nes::input::InputManager;
+                // Safe because we know input is valid for the lifetime of self
+                let input: &mut InputManager = unsafe { &mut *(&self.input as *const InputManager as *mut InputManager) };
                 input.write(value);
                 Ok(())
             }
             
             // APU and I/O registers
             0x4000..=0x4013 | 0x4015 | 0x4017 => {
-                // Create a mutable reference to APU for writing registers
-                let apu: &mut apu::Apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
-                apu.write_byte(addr, value)
+                use crate::nes::apu::Apu;
+                // Safe because we know apu is valid for the lifetime of self
+                let apu: &mut Apu = unsafe { &mut *(&self.apu as *const Apu as *mut Apu) };
+                apu.write_register(addr, value);
+                Ok(())
             }
             
             // PRG-ROM (read-only)
@@ -342,7 +365,7 @@ impl Memory for Nes {
                 Ok(())
             }
             
-            // Unmapped memory
+            // Unmapped memory - ignore writes
             _ => Ok(()),
         }
     }
