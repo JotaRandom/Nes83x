@@ -5,6 +5,7 @@ use gtk::prelude::*;
 use gtk::{Application, ApplicationWindow, DrawingArea};
 use gtk::gdk::Key;
 use gtk::glib;
+use gtk::glib::Propagate;
 
 // Re-export Inhibit for convenience
 use gtk::gdk::Inhibit;
@@ -164,7 +165,7 @@ impl Emulator {
                         Key::Shift_L | Key::Shift_R => nes.set_button_state(0, Button::Select, false),
                         _ => {}
                     }
-                    glib::Propagation::Continue
+Propagate(true)
                 });
         }
 

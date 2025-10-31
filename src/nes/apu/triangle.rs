@@ -23,7 +23,7 @@ pub struct Triangle {
 impl Triangle {
     /// Create a new Triangle channel
     pub fn new() -> Self {
-        Triangle {
+        let mut triangle = Triangle {
             control_flag: false,
             linear_counter_reload: false,
             linear_counter_reload_value: 0,
@@ -34,7 +34,23 @@ impl Triangle {
             timer: 0,
             sequencer_step: 0,
             sequencer_reload: false,
-        }
+        };
+        triangle.reset();
+        triangle
+    }
+    
+    /// Reset the triangle channel to its initial state
+    pub fn reset(&mut self) {
+        self.control_flag = false;
+        self.linear_counter_reload = false;
+        self.linear_counter_reload_value = 0;
+        self.timer_period = 0;
+        self.length_counter = 0;
+        self.enabled = false;
+        self.linear_counter = 0;
+        self.timer = 0;
+        self.sequencer_step = 0;
+        self.sequencer_reload = false;
     }
     
     /// Write to control register ($4008)

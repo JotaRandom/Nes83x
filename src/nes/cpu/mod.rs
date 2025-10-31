@@ -15,13 +15,21 @@ use thiserror::Error;
 use std::io;
 
 
-// Include the unofficial opcodes module
+// Include the unofficial opcodes modules
 #[cfg(feature = "unofficial_ops")]
 mod unofficial;
+
+// Include the additional unofficial opcodes implementation
+#[cfg(feature = "unofficial_ops")]
+mod unofficial_ops;
 
 // Re-export unofficial opcodes when the feature is enabled
 #[cfg(feature = "unofficial_ops")]
 pub use unofficial::*;
+
+// Re-export additional unofficial opcodes
+#[cfg(feature = "unofficial_ops")]
+pub use unofficial_ops::*;
 
 // Re-export the Memory trait
 pub use crate::nes::utils::Memory;

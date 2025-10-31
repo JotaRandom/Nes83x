@@ -1,5 +1,7 @@
 //! NES Audio Processing Unit (APU) emulation
 
+use std::cell::Cell;
+
 // Constants
 /// Length counter lookup table (0-31)
 pub const LENGTH_TABLE: [u8; 32] = [
@@ -53,7 +55,7 @@ pub struct Apu {
     
     // Internal state
     cycle: u64,
-    frame_irq: bool,
+    frame_irq: Cell<bool>,
     dmc_irq: bool,
 }
 
@@ -68,22 +70,23 @@ impl Apu {
             dmc: Dmc::new(),
             frame_counter: FrameCounter::new(),
             cycle: 0,
-            frame_irq: false,
+            frame_irq: Cell::new(false),
             dmc_irq: false,
         }
     }
     
     /// Reset the APU to its initial state
     pub fn reset(&mut self) {
-        self.pulse1 = Pulse::new(1);
-        self.pulse2 = Pulse::new(2);
-        self.triangle = Triangle::new();
-        self.noise = Noise::new();
-        self.dmc = Dmc::new();
-        self.frame_counter = FrameCounter::new();
         self.cycle = 0;
-        self.frame_irq = false;
+        self.frame_irq.set(false);
         self.dmc_irq = false;
+        
+        self.pulse1.reset();
+        self.pulse2.reset();
+        self.triangle.reset();
+        self.noise.reset();
+        self.dmc.reset();
+        self.frame_counter.reset();
     }
     
     /// Execute one APU cycle (1 CPU cycle = 2 APU cycles)
@@ -238,26 +241,19 @@ impl Apu {
 impl Memory for Apu {
     fn read_byte(&self, addr: u16) -> std::io::Result<u8> {
         match addr {
-            // Status register ($4015)
             0x4015 => {
-                let mut result = 0;
+                // APU Status Register
+                let mut result = 0u8;
                 
-                if self.pulse1.length_counter > 0 {
-                    result |= 0x01;
-                }
-                if self.pulse2.length_counter > 0 {
-                    result |= 0x02;
-                }
-                if self.triangle.length_counter > 0 {
-                    result |= 0x04;
-                }
-                if self.noise.length_counter > 0 {
-                    result |= 0x08;
-                }
-                if self.dmc.bytes_remaining > 0 {
-                    result |= 0x10;
-                }
-                if self.frame_irq {
+                // Set bits based on channel status
+                if self.pulse1.length_counter > 0 { result |= 0x01; }
+                if self.pulse2.length_counter > 0 { result |= 0x02; }
+                if self.triangle.length_counter > 0 { result |= 0x04; }
+                if self.noise.length_counter > 0 { result |= 0x08; }
+                if self.dmc.bytes_remaining > 0 { result |= 0x10; }
+                
+                // Set interrupt flags
+                if self.frame_irq.get() {
                     result |= 0x40;
                 }
                 if self.dmc_irq {
@@ -265,9 +261,7 @@ impl Memory for Apu {
                 }
                 
                 // Reading the status register clears the frame interrupt flag
-                if let Some(frame_irq) = &mut self.frame_irq {
-                    *frame_irq = false;
-                }
+                self.frame_irq.set(false);
                 
                 Ok(result)
             }
@@ -316,7 +310,7 @@ mod tests {
     fn test_apu_reset() {
         let apu = Apu::new();
         assert_eq!(apu.cycle, 0);
-        assert!(!apu.frame_irq);
+        assert!(!apu.frame_irq.get());
         assert!(!apu.dmc_irq);
     }
     

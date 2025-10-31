@@ -216,7 +216,7 @@ impl Ppu {
         match addr % 8 {
             // PPUCTRL
             0x0 => {
-                let old_ctrl = self.regs.ctrl.bits();
+                let _old_ctrl = self.regs.ctrl.bits();
                 self.regs.ctrl = ControlRegister::from_bits_truncate(value);
 
                 // Update NMI flag if needed

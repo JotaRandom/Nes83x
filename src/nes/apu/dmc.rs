@@ -31,7 +31,7 @@ pub struct Dmc {
 impl Dmc {
     /// Create a new DMC channel
     pub fn new() -> Self {
-        Dmc {
+        let mut dmc = Dmc {
             irq_enabled: false,
             loop_flag: false,
             rate_index: 0,
@@ -49,7 +49,30 @@ impl Dmc {
             tick_period: 0,
             tick_value: 0,
             irq_pending: false,
-        }
+        };
+        dmc.reset();
+        dmc
+    }
+    
+    /// Reset the DMC channel to its initial state
+    pub fn reset(&mut self) {
+        self.irq_enabled = false;
+        self.loop_flag = false;
+        self.rate_index = 0;
+        self.direct_load = 0;
+        self.sample_address = 0;
+        self.sample_length = 0;
+        self.enabled = false;
+        self.current_address = 0;
+        self.bytes_remaining = 0;
+        self.sample_buffer = None;
+        self.shift_register = 0;
+        self.bit_counter = 0;
+        self.silence = true;
+        self.output_level = 0;
+        self.tick_period = 0;
+        self.tick_value = 0;
+        self.irq_pending = false;
     }
     
     /// Fetch a byte from memory at the current address

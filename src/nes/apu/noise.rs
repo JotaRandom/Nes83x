@@ -151,6 +151,23 @@ impl Noise {
         }
     }
     
+    /// Reset the noise channel to its initial state
+    pub fn reset(&mut self) {
+        self.enabled = false;
+        self.length_counter = 0;
+        self.envelope_volume = 0;
+        self.envelope_decay = 0;
+        self.envelope_divider = 0;
+        self.envelope_start = false;
+        self.constant_volume = false;
+        self.volume = 0;
+        self.timer = 0;
+        self.timer_period = 0;
+        self.shift_register = 1;  // Initial value is 1
+        self.mode = false;
+        self.halt_length_counter = false;
+    }
+    
     /// Clock the noise channel (called every APU cycle)
     pub fn clock(&mut self) {
         // Decrement the timer
@@ -169,41 +186,6 @@ impl Noise {
             }
         } else {
             self.timer -= 1;
-        }
-    }
-    
-    /// Clock the envelope generator
-    pub fn clock_envelope(&mut self) {
-        if self.envelope_start {
-            // Start a new envelope
-            self.envelope_volume = 15;
-            self.envelope_divider = self.volume;
-            self.envelope_decay = 15;
-            self.envelope_start = false;
-        } else if self.envelope_divider > 0 {
-            // Decrement the divider
-            self.envelope_divider -= 1;
-        } else {
-            // Reset the divider
-            self.envelope_divider = self.volume;
-            
-            if self.envelope_decay > 0 {
-                // Decrement the decay level
-                self.envelope_decay -= 1;
-            } else if self.halt_length_counter {
-                // If the length counter is halted, the decay level is set to 15
-                self.envelope_decay = 15;
-            }
-            
-            // Update the envelope volume
-            self.envelope_volume = self.envelope_decay;
-        }
-    }
-    
-    /// Clock the length counter
-    pub fn clock_length_counter(&mut self) {
-        if !self.halt_length_counter && self.length_counter > 0 {
-            self.length_counter -= 1;
         }
     }
 }

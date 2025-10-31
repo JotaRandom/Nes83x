@@ -12,7 +12,7 @@ use self::cpu::Cpu;
 use self::ppu::Ppu;
 use self::apu::Apu;
 use self::mapper::Mapper;
-use self::input::{InputManager, Button, Reset};
+use self::input::{InputManager, Button};
 
 // Re-export the Memory trait
 pub use crate::nes::utils::Memory;
@@ -74,7 +74,9 @@ impl Memory for Nes {
             // PPU registers (mirrored every 8 bytes)
             0x2000..=0x3FFF => {
                 let ppu_addr = 0x2000 + (addr & 0x0007);
-                self.ppu.read_register(ppu_addr)
+                // Create a mutable reference to PPU for reading registers
+                let ppu: &mut crate::nes::ppu::Ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                Ok(ppu.read_register(ppu_addr))
             }
             
             // APU and I/O registers
@@ -93,7 +95,7 @@ impl Memory for Nes {
             // Cartridge space (PRG ROM, PRG RAM, and mapper registers)
             0x4020..=0xFFFF => {
                 if let Some(ref cart) = self.cart {
-                    cart.read_prg_byte(addr)
+                    Ok(cart.read_prg_byte(addr))
                 } else {
                     // If no cartridge is present, return 0xFF (open bus behavior)
                     Ok(0xFF)
@@ -134,7 +136,8 @@ impl Memory for Nes {
             // Cartridge space (PRG ROM, PRG RAM, and mapper registers)
             0x4020..=0xFFFF => {
                 if let Some(ref mut cart) = self.cart {
-                    cart.write_prg_byte(addr, value)
+                    cart.write_prg_byte(addr, value);
+                    Ok(())
                 } else {
                     // If no cartridge is present, the write is ignored
                     Ok(())
@@ -220,9 +223,9 @@ impl Nes {
         offset += prg_rom_size;
         
         // Load CHR ROM (if present, otherwise we'll use CHR RAM)
-        let chr_rom = if chr_rom_size > 0 {
+        let _chr_rom = if chr_rom_size > 0 {
             let chr = &rom_data[offset..offset + chr_rom_size];
-            offset += chr_rom_size;
+            let _ = offset; // offset is not used after this point
             Some(chr.to_vec())
         } else {
             None
@@ -237,7 +240,7 @@ impl Nes {
         
         // Copy PRG ROM to CPU memory
         // If PRG ROM is 16KB, mirror it to both banks
-        let prg_rom = if prg_rom_size == 16 * 1024 {
+        let _prg_rom = if prg_rom_size == 16 * 1024 {
             let mut mirrored = Vec::with_capacity(32 * 1024);
             mirrored.extend_from_slice(prg_rom);
             mirrored.extend_from_slice(prg_rom);

@@ -8,33 +8,15 @@
 use super::{Cpu, CpuResult, CpuError, AddressingMode, StatusFlags};
 use crate::nes::utils::Memory;
 
+// Include the additional implementations
+mod unofficial_impls;
+mod more_unofficial;
+
+// Re-export the additional implementations
+pub use unofficial_impls::*;
+pub use more_unofficial::*;
+
 impl Cpu {
-    /// ASR/ALR - AND with Accumulator then Logical Shift Right
-    /// 
-    /// This is an undocumented instruction that performs a bitwise AND between the accumulator
-    /// and a memory value, then shifts the result right by one bit.
-    /// 
-    /// # Opcodes
-    /// - 0x4B: ASR #imm (Immediate)
-    /// 
-    /// # Flags Affected
-    /// - N: Set if bit 7 of the result is set
-    /// - Z: Set if the result is zero
-    /// - C: Set to the value of bit 0 of the result before shifting
-    pub(crate) fn asr(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
-        let value = memory.read_byte(self.reg.pc).map_err(CpuError::MemoryError)?;
-        self.reg.pc = self.reg.pc.wrapping_add(1);
-        let result = self.reg.a & value;
-        let carry = (result & 0x01) != 0;
-        let result = result >> 1;
-        
-        self.reg.a = result;
-        self.reg.p.set(StatusFlags::CARRY, carry);
-        self.reg.p.set(StatusFlags::ZERO, result == 0);
-        self.reg.p.set(StatusFlags::NEGATIVE, (result & 0x80) != 0);
-        
-        Ok(2)  // Base cycles
-    }
     /// AAC (ANC) - AND Accumulator with Memory then Move Bit 7 to Carry
     /// 
     /// This unofficial opcode performs a bitwise AND between the accumulator and a memory value,

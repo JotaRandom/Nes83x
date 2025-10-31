@@ -1,7 +1,7 @@
 //! NES Cartridge handling
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::path::Path;
 
 /// Represents an NES cartridge
@@ -84,7 +84,7 @@ impl Cartridge {
         file.read_exact(&mut prg_rom)?;
         
         // Read CHR ROM (or create CHR RAM if size is 0)
-        let mut chr_rom = if chr_rom_size > 0 {
+        let chr_rom = if chr_rom_size > 0 {
             let mut rom = vec![0u8; chr_rom_size];
             file.read_exact(&mut rom)?;
             rom

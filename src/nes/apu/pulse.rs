@@ -36,7 +36,7 @@ pub struct Pulse {
 impl Pulse {
     /// Create a new Pulse channel
     pub fn new(channel: u8) -> Self {
-        Pulse {
+        let mut pulse = Pulse {
             channel,
             duty_cycle: 0,
             halt_length_counter: false,
@@ -48,17 +48,43 @@ impl Pulse {
             sweep_period: 0,
             sweep_reload: false,
             timer_period: 0,
-            length_counter: 0,
             enabled: false,
+            length_counter: 0,
+            envelope_volume: 0,
             timer: 0,
             sequencer: 0,
             envelope_start: false,
             envelope_divider: 0,
             envelope_decay: 0,
-            envelope_volume: 0,
             sweep_divider: 0,
-            sweep_mute: false,
-        }
+            sweep_mute: true,
+        };
+        pulse.reset();
+        pulse
+    }
+    
+    /// Reset the pulse channel to its initial state
+    pub fn reset(&mut self) {
+        self.duty_cycle = 0;
+        self.halt_length_counter = false;
+        self.constant_volume = false;
+        self.volume = 0;
+        self.sweep_enabled = false;
+        self.sweep_negate = false;
+        self.sweep_shift = 0;
+        self.sweep_period = 0;
+        self.sweep_reload = false;
+        self.timer_period = 0;
+        self.enabled = false;
+        self.length_counter = 0;
+        self.envelope_volume = 0;
+        self.timer = 0;
+        self.sequencer = 0;
+        self.envelope_start = false;
+        self.envelope_divider = 0;
+        self.envelope_decay = 0;
+        self.sweep_divider = 0;
+        self.sweep_mute = true;
     }
     
     /// Write to control register ($4000 / $4004)
@@ -139,19 +165,20 @@ impl Pulse {
     /// Clock the sweep unit
     pub fn clock_sweep(&mut self) {
         if self.sweep_reload {
-            if self.sweep_divider == 0 && self.sweep_enabled && self.sweep_shift > 0 {
-                self.sweep();
+            if self.sweep_divider == 0 && self.sweep_enabled && !self.sweep_mute {
+                // Update the period
+                self.update_period();
             }
             self.sweep_divider = self.sweep_period;
             self.sweep_reload = false;
         } else if self.sweep_divider > 0 {
             self.sweep_divider -= 1;
         } else {
-            self.sweep_divider = self.sweep_period;
-            
-            if self.sweep_enabled && self.sweep_shift > 0 {
-                self.sweep();
+            if self.sweep_enabled && !self.sweep_mute {
+                // Update the period
+                self.update_period();
             }
+            self.sweep_divider = self.sweep_period;
         }
     }
     
@@ -204,45 +231,6 @@ impl Pulse {
         self.update_sweep_mute();
     }
     
-    /// Clock the length counter and envelope generator
-    pub fn clock_envelope(&mut self) {
-        // Clock the envelope
-        if self.envelope_start {
-            self.envelope_volume = 15;
-            self.envelope_divider = self.volume;
-            self.envelope_start = false;
-        } else if self.envelope_divider > 0 {
-            self.envelope_divider -= 1;
-        } else {
-            self.envelope_divider = self.volume;
-            
-            if self.envelope_volume > 0 {
-                self.envelope_volume -= 1;
-            } else if self.halt_length_counter {
-                self.envelope_volume = 15;
-            }
-        }
-    }
-    
-    /// Clock the sweep unit
-    pub fn clock_sweep(&mut self) {
-        if self.sweep_reload {
-            if self.sweep_divider == 0 && self.sweep_enabled && !self.sweep_mute {
-                // Update the period
-                self.update_period();
-            }
-            self.sweep_divider = self.sweep_period;
-            self.sweep_reload = false;
-        } else if self.sweep_divider > 0 {
-            self.sweep_divider -= 1;
-        } else {
-            if self.sweep_enabled && !self.sweep_mute {
-                // Update the period
-                self.update_period();
-            }
-            self.sweep_divider = self.sweep_period;
-        }
-    }
     
     /// Update the period based on the sweep unit
     fn update_period(&mut self) {
