@@ -114,12 +114,48 @@ sudo dnf install \
 
 ## Building
 
+### Prerequisites
+
+#### Windows with WSL (Recommended)
+1. Install WSL2 and Arch Linux:
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+
+2. Set up Arch Linux in WSL:
+   ```bash
+   # Update system
+   sudo pacman -Syu
+   
+   # Install dependencies
+   sudo pacman -S --needed base-devel gtk4 pango cairo gdk-pixbuf2 gcc pkgconf gtk4
+   ```
+
+3. Clone and build:
+   ```bash
+   # Navigate to your Windows files from WSL
+   cd /mnt/c/Users/yourusername/OneDrive/Documentos/GitHub/Nes83x
+   
+   # Build in release mode (recommended)
+   cargo build --release
+   ```
+
+#### Native Linux
 ```bash
-# Clone the repository
+# Install dependencies (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    libgtk-4-dev \
+    libgdk-pixbuf2.0-dev \
+    libglib2.0-dev \
+    libcairo2-dev \
+    pkg-config \
+    libpango1.0-dev
+
+# Clone and build
 git clone https://github.com/yourusername/nes83x-rs.git
 cd nes83x-rs
-
-# Build in release mode (recommended)
 cargo build --release
 ```
 
@@ -127,6 +163,19 @@ The binary will be available at `target/release/nes83x-rs`.
 
 ## Running
 
+### WSL with X11 Forwarding
+1. Install an X server on Windows (e.g., VcXsrv, X410)
+2. Run the X server and allow public/private network access
+3. In WSL:
+   ```bash
+   # Set display to use Windows host's X server
+   export DISPLAY=$(grep -m 1 nameserver /etc/resolv.conf | awk '{print $2}'):0
+   
+   # Run the emulator
+   cargo run --release -- /path/to/rom.nes
+   ```
+
+### Native Linux
 ```bash
 # Run the emulator
 cargo run --release -- path/to/rom.nes
@@ -143,6 +192,32 @@ RUST_LOG=debug cargo run -- --debug path/to/rom.nes
 - **Enter**: Start
 - **Shift**: Select
 - **Escape**: Quit
+
+## Troubleshooting
+
+### WSL Audio
+For audio in WSL, you'll need to set up PulseAudio or use Windows' native audio:
+
+1. Install PulseAudio for Windows
+2. In WSL:
+   ```bash
+   # Install PulseAudio client libraries
+   sudo apt install -y pulseaudio-utils
+   
+   # Set PulseAudio server address
+   echo "export PULSE_SERVER=host.docker.internal" >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+### GTK Theme Issues
+If the UI looks off, try setting a GTK theme:
+```bash
+# Install a theme
+sudo pacman -S adwaita-icon-theme
+
+# Set the theme
+export GTK_THEME=Adwaita
+```
 
 ## Project Structure
 

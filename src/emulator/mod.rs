@@ -5,10 +5,12 @@ use gtk::prelude::*;
 use gtk::{Application, ApplicationWindow, DrawingArea};
 use gtk::gdk::Key;
 use gtk::glib;
-use gtk::glib::Propagate;
 
-// Re-export Inhibit for convenience
-use gtk::gdk::Inhibit;
+// Use Propagation instead of Propagate
+use gtk::glib::Propagation;
+
+// Inhibit is now in gtk::prelude
+// Import gdk4 as gdk for key handling
 
 // GDK4 imports for key handling
 use gdk4 as gdk;
@@ -165,7 +167,7 @@ impl Emulator {
                         Key::Shift_L | Key::Shift_R => nes.set_button_state(0, Button::Select, false),
                         _ => {}
                     }
-Propagate(true)
+                    gtk::Inhibit(false)
                 });
         }
 
@@ -185,6 +187,7 @@ Propagate(true)
             if let Some(app) = window.application() {
                 app.quit();
             }
+            gtk::Inhibit(false)
             glib::Propagation::Stop
         });
 

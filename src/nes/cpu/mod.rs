@@ -857,17 +857,7 @@ impl Cpu {
     // Stack Operations
     // =============================================
     
-    fn push_byte(&mut self, memory: &mut impl Memory, value: u8) -> CpuResult<()> {
-        memory.write_byte(0x0100 | (self.reg.s as u16), value)?;
-        self.reg.s = self.reg.s.wrapping_sub(1);
-        Ok(())
-    }
-    
-    fn push_word(&mut self, memory: &mut impl Memory, value: u16) -> CpuResult<()> {
-        let [hi, lo] = value.to_be_bytes();
-        self.push_byte(memory, hi)?;
-        self.push_byte(memory, lo)
-    }
+    // push_byte and push_word implementations are now only at the bottom of the file
     
     fn pull_byte(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
         self.reg.s = self.reg.s.wrapping_add(1);

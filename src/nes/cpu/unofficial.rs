@@ -9,12 +9,11 @@ use super::{Cpu, CpuResult, CpuError, AddressingMode, StatusFlags};
 use crate::nes::utils::Memory;
 
 // Include the additional implementations
-mod unofficial_impls;
-mod more_unofficial;
+// These are now directly in this file, so no need for separate modules
 
-// Re-export the additional implementations
-pub use unofficial_impls::*;
-pub use more_unofficial::*;
+// Re-export the additional implementations from other files
+pub use super::unofficial_impls::*;
+pub use super::more_unofficial::*;
 
 impl Cpu {
     /// AAC (ANC) - AND Accumulator with Memory then Move Bit 7 to Carry
