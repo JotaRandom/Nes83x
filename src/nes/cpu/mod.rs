@@ -255,41 +255,38 @@ impl<M: Memory> Cpu<M> {
     /// Returns `CpuError` if an invalid opcode is encountered or memory access fails
     pub fn step(&mut self) -> Result<u32, CpuError> {
         let memory = self.memory.memory_mut();
+        
         if !self.is_running {
             return Err(CpuError::InvalidState);
         }
 
-        let mut cycles: u32 = 0;
-
-        // Handle NMI (highest priority)
+        // Check for NMI (highest priority)
         if self.nmi_pending {
             self.nmi_pending = false;
-            cycles += self.handle_interrupt(memory, 0xFFFA, false)? as u32;
-            return Ok(cycles);
+            return self.handle_interrupt(0xFFFA, false).map(|c| c as u32);
         }
 
-        // Handle IRQ (if not masked)
-        if self.irq_pending && !self.reg.p.contains(StatusFlags::INTERRUPT_DISABLE) {
+        // Check for IRQ (lower priority)
+        if !self.reg.p.contains(StatusFlags::INTERRUPT_DISABLE) && self.irq_pending {
             self.irq_pending = false;
-            cycles += self.handle_interrupt(memory, 0xFFFE, false)? as u32;
-            return Ok(cycles);
+            return self.handle_interrupt(0xFFFE, false).map(|c| c as u32);
         }
 
-        // Fetch the next opcode
+        // Fetch and execute instruction
         let opcode = memory.read_byte(self.reg.pc)?;
         self.reg.pc = self.reg.pc.wrapping_add(1);
-
-        // Execute the instruction
-        cycles += self.execute_instruction(opcode, memory)? as u32;
-
+        
+        let cycles = self.execute_instruction(opcode)? as u32;
+        
+        // Update cycle count
+        self.cycles = self.cycles.wrapping_add(cycles);
+        
         Ok(cycles)
     }
-    
     /// Execute a single CPU instruction (internal implementation)
     /// 
     /// # Arguments
     /// * `opcode` - The opcode to execute
-    /// * `memory` - A mutable reference to the memory interface
     /// 
     /// # Returns
     /// The number of cycles the instruction took to execute, or an error if the opcode is invalid
@@ -661,27 +658,22 @@ impl<M: Memory> Cpu<M> {
             self.reg.pc
         };
         
-        // Push PC and status to stack (high byte first)
-        self.push_byte(memory, (pc >> 8) as u8)?;
-        self.push_byte(memory, pc as u8)?;
+        // Push PC and status register
+        self.push_word(pc)?;
         
-        // Push status with Break flag set for BRK, cleared otherwise
-        let mut status = self.reg.p;
+        // Push status with B flag set for BRK, cleared for NMI/IRQ
+        let mut status = self.reg.p.bits();
         if is_brk {
-            status.insert(StatusFlags::BREAK);
+            status |= StatusFlags::BREAK.bits();
         } else {
-            status.remove(StatusFlags::BREAK);
+            status &= !StatusFlags::BREAK.bits();
         }
-        // Always set the unused bit when pushing to stack
-        status.insert(StatusFlags::UNUSED);
-        self.push_byte(memory, status.bits())?;
+        self.push_byte(status)?;
         
-        // Set interrupt disable flag (except for BRK which already has it set)
-        if !is_brk {
-            self.reg.p.insert(StatusFlags::INTERRUPT_DISABLE);
-        }
+        // Set interrupt disable flag
+        self.reg.p.insert(StatusFlags::INTERRUPT_DISABLE);
         
-        // Read the new PC from the interrupt vector
+        // Jump to interrupt vector
         self.reg.pc = memory.read_word(vector)?;
         
         // Interrupts take 7 cycles
@@ -695,16 +687,6 @@ impl<M: Memory> Cpu<M> {
     /// Get the address for the specified addressing mode
     /// Returns (address, page_crossed, extra_cycles)
     /// 
-    /// - address: The resolved memory address
-    /// - page_crossed: Whether a page boundary was crossed (for cycle counting)
-    /// - extra_cycles: Number of additional cycles needed (0 or 1 for page crossing)
-    fn get_operand_address(&mut self, mode: AddressingMode) -> CpuResult<(u16, bool, u8)> {
-        let memory = self.memory.memory_mut();
-        match mode {
-            AddressingMode::Implied => Ok((0, false, 0)),
-            AddressingMode::Accumulator => Ok((0, false, 0)),
-            AddressingMode::Immediate => {
-                let addr = self.reg.pc;
                 self.reg.pc = self.reg.pc.wrapping_add(1);
                 Ok((addr, false, 0))
             },
@@ -820,53 +802,60 @@ impl<M: Memory> Cpu<M> {
     // Stack Operations
     // =============================================
     
+    /// Push a byte onto the stack
     fn push_byte(&mut self, value: u8) -> CpuResult<()> {
-        let memory = self.memory.memory_mut();
-        memory.write_byte(0x0100 | (self.reg.s as u16), value)?;
+        let addr = 0x0100 | (self.reg.s as u16);
+        self.memory.write_byte(addr, value)?;
         self.reg.s = self.reg.s.wrapping_sub(1);
         Ok(())
     }
     
+    /// Push a word (16-bit value) onto the stack
     fn push_word(&mut self, value: u16) -> CpuResult<()> {
         self.push_byte((value >> 8) as u8)?;
         self.push_byte(value as u8)
     }
     
+    /// Pull a byte from the stack
     fn pull_byte(&mut self) -> CpuResult<u8> {
-        let memory = self.memory.memory_mut();
         self.reg.s = self.reg.s.wrapping_add(1);
-        memory.read_byte(0x0100 | (self.reg.s as u16))
+        let addr = 0x0100 | (self.reg.s as u16);
+        self.memory.read_byte(addr)
     }
     
+    /// Pull a word (16-bit value) from the stack
     fn pull_word(&mut self) -> CpuResult<u16> {
         let lo = self.pull_byte()? as u16;
         let hi = self.pull_byte()? as u16;
         Ok((hi << 8) | lo)
     }
-    
     /// ADC - Add with Carry
     /// 
     /// This instruction adds the contents of a memory location to the accumulator together with the carry bit.
     /// If overflow occurs the carry bit is set, this enables multiple byte addition to be performed.
-    fn adc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
+    fn adc(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode)?;
+        let value = if matches!(mode, AddressingMode::Immediate) {
+            addr as u8
+        } else {
+            memory.read_byte(addr)?
+        };
         
         self.adc_impl(value)?;
         
-        // Base cycles + extra cycles for page crossing
-        let base_cycles = match mode {
+        // Return cycle count based on addressing mode
+        Ok(match mode {
             AddressingMode::Immediate => 2,
             AddressingMode::ZeroPage => 3,
             AddressingMode::ZeroPageX => 4,
             AddressingMode::Absolute => 4,
-            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4,
+            AddressingMode::AbsoluteX => 4 + extra_cycles,
+            AddressingMode::AbsoluteY => 4 + extra_cycles,
             AddressingMode::IndirectX => 6,
-            AddressingMode::IndirectY => 5,
+            AddressingMode::IndirectY => 5 + extra_cycles,
             _ => return Err(CpuError::InvalidAddressingMode(mode)),
-        };
-        
-        Ok(base_cycles + extra_cycles as u8)
+        })
     }
     
     /// Internal implementation of ADC operation
@@ -901,10 +890,11 @@ impl<M: Memory> Cpu<M> {
     
     
     /// SBC - Subtract with Carry
-    fn sbc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
+    fn sbc(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
         // SBC is the same as ADC with the operand's bits inverted
         // and the carry flag treated as inverted
-        let (addr, _page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+        let (addr, _page_crossed, extra_cycles) = self.get_operand_address(mode)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -944,8 +934,9 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// AND - Logical AND
-    fn and(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn and(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -955,13 +946,14 @@ impl<M: Memory> Cpu<M> {
         self.reg.a &= value;
         self.update_zero_and_negative_flags(self.reg.a);
         
-        // Base cycles + extra cycles for page crossing
+        // Return cycle count based on addressing mode
         Ok(match mode {
             AddressingMode::Immediate => 2,
             AddressingMode::ZeroPage => 3,
             AddressingMode::ZeroPageX => 4,
             AddressingMode::Absolute => 4,
-            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4 + extra_cycles,
+            AddressingMode::AbsoluteX => 4 + extra_cycles,
+            AddressingMode::AbsoluteY => 4 + extra_cycles,
             AddressingMode::IndirectX => 6,
             AddressingMode::IndirectY => 5 + extra_cycles,
             _ => return Err(CpuError::InvalidAddressingMode(mode)),
@@ -969,8 +961,9 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// EOR - Exclusive OR
-    fn eor(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn eor(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -980,13 +973,14 @@ impl<M: Memory> Cpu<M> {
         self.reg.a ^= value;
         self.update_zero_and_negative_flags(self.reg.a);
         
-        // Base cycles + extra cycles for page crossing
+        // Return cycle count based on addressing mode
         Ok(match mode {
             AddressingMode::Immediate => 2,
             AddressingMode::ZeroPage => 3,
             AddressingMode::ZeroPageX => 4,
             AddressingMode::Absolute => 4,
-            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4 + extra_cycles,
+            AddressingMode::AbsoluteX => 4 + extra_cycles,
+            AddressingMode::AbsoluteY => 4 + extra_cycles,
             AddressingMode::IndirectX => 6,
             AddressingMode::IndirectY => 5 + extra_cycles,
             _ => return Err(CpuError::InvalidAddressingMode(mode)),
@@ -994,8 +988,9 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// ORA - Logical Inclusive OR
-    fn ora(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn ora(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -1005,58 +1000,40 @@ impl<M: Memory> Cpu<M> {
         self.reg.a |= value;
         self.update_zero_and_negative_flags(self.reg.a);
         
-        // Base cycles + extra cycles for page crossing
+        // Return cycle count based on addressing mode
         Ok(match mode {
             AddressingMode::Immediate => 2,
             AddressingMode::ZeroPage => 3,
             AddressingMode::ZeroPageX => 4,
             AddressingMode::Absolute => 4,
-            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => 4 + extra_cycles,
+            AddressingMode::AbsoluteX => 4 + extra_cycles,
+            AddressingMode::AbsoluteY => 4 + extra_cycles,
             AddressingMode::IndirectX => 6,
             AddressingMode::IndirectY => 5 + extra_cycles,
-            _ => return Err(CpuError::InvalidAddressingMode(mode)),
-        })
-    }
     
-    /// BIT - Bit Test
-    fn bit(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
-        
-        // Set zero flag if (A & value) == 0
-        self.reg.p.set(StatusFlags::ZERO, (self.reg.a & value) == 0);
-        
-        // Set overflow flag to bit 6 of value
-        self.reg.p.set(StatusFlags::OVERFLOW, (value & 0x40) != 0);
-        
-        // Set negative flag to bit 7 of value
-        self.reg.p.set(StatusFlags::NEGATIVE, (value & 0x80) != 0);
-        
-        Ok(match mode {
-            AddressingMode::ZeroPage => 3,
-            AddressingMode::Absolute => 4,
-            _ => return Err(CpuError::InvalidAddressingMode(mode)),
-        })
+    // Set carry flag if sum > 255 (same as ADC)
+    self.reg.p.set(StatusFlags::CARRY, sum > 0xFF);
     }
     
     /// CMP - Compare Accumulator
-    fn cmp(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        self.compare_register(mode, self.reg.a, memory)
+    fn cmp(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        self.compare_register(mode, self.reg.a)
     }
     
     /// CPX - Compare X Register
-    fn cpx(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        self.compare_register(mode, self.reg.x, memory)
+    fn cpx(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        self.compare_register(mode, self.reg.x)
     }
     
     /// CPY - Compare Y Register
-    fn cpy(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        self.compare_register(mode, self.reg.y, memory)
+    fn cpy(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        self.compare_register(mode, self.reg.y)
     }
     
     /// Common compare logic used by CMP, CPX, CPY
-    fn compare_register(&mut self, mode: AddressingMode, register: u8, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _page_crossed, _extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn compare_register(&mut self, mode: AddressingMode, register: u8) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, _page_crossed, extra_cycles) = self.get_operand_address(mode)?;
         let value = if matches!(mode, AddressingMode::Immediate) { addr as u8 } else { memory.read_byte(addr)? };
         
         // Compare is like SBC but doesn't store the result
@@ -1073,6 +1050,8 @@ impl<M: Memory> Cpu<M> {
             AddressingMode::Immediate => 2,
             AddressingMode::ZeroPage => 3,
             AddressingMode::Absolute => 4,
+            AddressingMode::ZeroPageX => 4,
+            AddressingMode::AbsoluteX => 4 + extra_cycles,
             _ => return Err(CpuError::InvalidAddressingMode(mode)),
         })
     }
@@ -1082,12 +1061,15 @@ impl<M: Memory> Cpu<M> {
     // =============================================
     
     /// INC - Increment Memory
-    fn inc(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
+    fn inc(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, _, _) = self.get_operand_address(mode)?;
         let value = memory.read_byte(addr)?.wrapping_add(1);
         memory.write_byte(addr, value)?;
+        
         self.update_zero_and_negative_flags(value);
         
+        // Return cycle count based on addressing mode
         Ok(match mode {
             AddressingMode::ZeroPage => 5,
             AddressingMode::ZeroPageX => 6,
@@ -1112,12 +1094,15 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// DEC - Decrement Memory
-    fn dec(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
+    fn dec(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, _, _) = self.get_operand_address(mode)?;
         let value = memory.read_byte(addr)?.wrapping_sub(1);
         memory.write_byte(addr, value)?;
+        
         self.update_zero_and_negative_flags(value);
         
+        // Return cycle count based on addressing mode
         Ok(match mode {
             AddressingMode::ZeroPage => 5,
             AddressingMode::ZeroPageX => 6,
@@ -1156,31 +1141,8 @@ impl<M: Memory> Cpu<M> {
         // Update flags
         self.update_zero_and_negative_flags(self.reg.a);
         
+        // Return 2 cycles for accumulator mode
         Ok(2)
-    }
-    
-    /// ASL - Arithmetic Shift Left (Memory)
-    fn asl(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, _, _) = self.get_operand_address(mode, memory)?;
-        let value = memory.read_byte(addr)?;
-        
-        // Set carry to bit 7 of value
-        self.reg.p.set(StatusFlags::CARRY, (value & 0x80) != 0);
-        
-        // Shift left and write back
-        let result = value.wrapping_shl(1);
-        memory.write_byte(addr, result)?;
-        
-        // Update flags
-        self.update_zero_and_negative_flags(result);
-        
-        Ok(match mode {
-            AddressingMode::ZeroPage => 5,
-            AddressingMode::ZeroPageX => 6,
-            AddressingMode::Absolute => 6,
-            AddressingMode::AbsoluteX => 7,
-            _ => return Err(CpuError::InvalidAddressingMode(mode)),
-        })
     }
     
     /// LSR - Logical Shift Right (Accumulator)
@@ -1318,8 +1280,9 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// LDX - Load X Register
-    fn ldx(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn ldx(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -1341,8 +1304,9 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// LDY - Load Y Register
-    fn ldy(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
+    fn ldy(&mut self, mode: AddressingMode) -> CpuResult<u8> {
+        let memory = self.memory.memory_mut();
+        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode)?;
         let value = if matches!(mode, AddressingMode::Immediate) {
             addr as u8
         } else {
@@ -1359,6 +1323,9 @@ impl<M: Memory> Cpu<M> {
             AddressingMode::ZeroPageX => 4,
             AddressingMode::Absolute => 4,
             AddressingMode::AbsoluteX => 4 + extra_cycles,
+            _ => return Err(CpuError::InvalidAddressingMode(mode)),
+        })
+    }
 
 // Implement Memory trait for Cpu to allow direct memory access
 impl<M: Memory> Memory for Cpu<M> {
