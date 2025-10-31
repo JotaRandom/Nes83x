@@ -76,22 +76,22 @@ impl Dmc {
     }
     
     /// Fetch a byte from memory at the current address
-    fn fetch_byte(&mut self, memory: &mut dyn Memory) -> Option<u8> {
+    fn fetch_byte(&mut self, memory: &mut dyn Memory) -> Result<Option<u8>, crate::nes::utils::MemoryError> {
         if self.bytes_remaining == 0 {
-            return None;
+            return Ok(None);
         }
         
         // Read the byte from memory
-        let byte = memory.read_byte(0x8000 | self.current_address).ok()?;
+        let byte = memory.read_byte(0x8000 | self.current_address)?;
         
         // Update the address and remaining bytes
         self.current_address = if self.current_address == 0xFFFF {
             0x8000
         } else {
-            self.current_address + 1
+            self.current_address.wrapping_add(1)
         };
         
-        self.bytes_remaining -= 1;
+        self.bytes_remaining = self.bytes_remaining.wrapping_sub(1);
         
         // Handle loop if enabled and we've reached the end
         if self.bytes_remaining == 0 && self.loop_flag {
@@ -104,7 +104,7 @@ impl Dmc {
             self.irq_pending = true;
         }
         
-        Some(byte)
+        Ok(Some(byte))
     }
     
     /// Write to control register ($4010)
@@ -138,12 +138,12 @@ impl Dmc {
     }
     
     /// Clock the DMC channel
-    pub fn clock(&mut self, memory: &impl Memory) -> u8 {
+    pub fn clock(&mut self, memory: &mut dyn Memory) -> Result<u8, crate::nes::utils::MemoryError> {
         let mut irq_occurred = 0;
         
         // Only process if enabled
         if !self.enabled {
-            return 0;
+            return Ok(0);
         }
         
         // Clock the timer
@@ -160,7 +160,7 @@ impl Dmc {
         // Check if we need to start a new sample
         if self.sample_buffer.is_none() && self.bytes_remaining > 0 {
             // Start memory read
-            let _ = self.fetch_sample(memory);
+            self.fetch_sample(memory)?;
         }
         
         // Check for IRQ
@@ -168,7 +168,7 @@ impl Dmc {
             irq_occurred = 0x80;
         }
         
-        irq_occurred
+        Ok(irq_occurred)
     }
     
     /// Clock the output unit
@@ -208,29 +208,14 @@ impl Dmc {
     }
     
     /// Fetch a sample from memory
-    fn fetch_sample(&mut self, memory: &impl Memory) -> std::io::Result<()> {
-        // Read the sample byte
-        let sample = memory.read_byte(self.current_address)?;
-        self.sample_buffer = Some(sample);
-        
-        // Update address and remaining bytes
-        self.current_address = if self.current_address == 0xFFFF {
-            0x8000
+    pub fn fetch_sample(&mut self, memory: &mut dyn Memory) -> Result<(), crate::nes::utils::MemoryError> {
+        if let Some(byte) = self.fetch_byte(memory)? {
+            self.sample_buffer = Some(byte);
+            self.silence = false;
+            self.bit_counter = 8;
+            self.shift_register = byte;
         } else {
-            self.current_address + 1
-        };
-        
-        self.bytes_remaining -= 1;
-        
-        // Handle end of sample
-        if self.bytes_remaining == 0 {
-            if self.loop_flag {
-                // Restart the sample
-                self.restart();
-            } else if self.irq_enabled {
-                // Set IRQ flag
-                self.irq_pending = true;
-            }
+            self.silence = true;
         }
         
         Ok(())

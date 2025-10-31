@@ -1,4 +1,3 @@
-use super::registers::Registers;
 use std::cell::RefCell;
 use std::rc::Rc;
 

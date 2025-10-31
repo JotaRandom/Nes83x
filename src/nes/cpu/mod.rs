@@ -10,69 +10,22 @@
 //! - Proper interrupt handling (NMI, IRQ, BRK)
 //! - Memory-mapped I/O for communication with PPU, APU, and controllers
 
-use bitflags::bitflags;
-use thiserror::Error;
+use super::utils::Memory;
+use super::registers::Registers;
 use std::io;
-
-
-// Include the unofficial opcodes modules
-#[cfg(feature = "unofficial_ops")]
-mod unofficial;
-
-// Include the additional unofficial opcodes implementation
-#[cfg(feature = "unofficial_ops")]
-mod unofficial_ops;
-
-// Re-export unofficial opcodes when the feature is enabled
-#[cfg(feature = "unofficial_ops")]
-pub use unofficial::*;
-
-// Re-export additional unofficial opcodes
-#[cfg(feature = "unofficial_ops")]
-pub use unofficial_ops::*;
 
 // Re-export the Memory trait
 pub use crate::nes::utils::Memory;
 
+mod status_flags;
+mod unofficial_ops;
+#[cfg(feature = "unofficial_ops")]
+mod unofficial_ops_consolidated;
+
+pub use self::status_flags::StatusFlags;
+
 /// Represents the result of a memory access operation
 pub type CpuResult<T> = Result<T, CpuError>;
-
-bitflags! {
-    /// # CPU Status Register (P) Flags
-    ///
-    /// The status register contains 7 flags that indicate the current state of the CPU.
-    /// The 5th bit is unused but always set to 1 when pushed to the stack.
-    ///
-    /// | Bit | Mask | Name       | Description                                      |
-    /// |-----|------|------------|--------------------------------------------------|
-    /// | 7   | 0x80 | NEGATIVE   | Set when the result is negative (bit 7 is set)    |
-    /// | 6   | 0x40 | OVERFLOW   | Set when signed arithmetic overflows             |
-    /// | 5   | 0x20 | UNUSED     | Not used, always 1 when pushed to stack          |
-    /// | 4   | 0x10 | BREAK      | Set when a BRK instruction was executed          |
-    /// | 3   | 0x08 | DECIMAL    | Enables decimal mode (not used in NES)           |
-    /// | 2   | 0x04 | INTERRUPT  | When set, disables maskable interrupts (IRQ)     |
-    /// | 1   | 0x02 | ZERO       | Set when the result is zero                      |
-    /// | 0   | 0x01 | CARRY      | Set when an operation results in a carry/borrow  |
-    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct StatusFlags: u8 {
-        /// Carry Flag
-        const CARRY = 0b0000_0001;
-        /// Zero Flag
-        const ZERO = 0b0000_0010;
-        /// Interrupt Disable
-        const INTERRUPT_DISABLE = 0b0000_0100;
-        /// Decimal Mode (not used in NES, but present on 6502)
-        const DECIMAL = 0b0000_1000;
-        /// Break Command
-        const BREAK = 0b0001_0000;
-        /// Unused (always 1)
-        const UNUSED = 0b0010_0000;
-        /// Overflow Flag
-        const OVERFLOW = 0b0100_0000;
-        /// Negative Flag
-        const NEGATIVE = 0b1000_0000;
-    }
-}
 
 /// # 6502 CPU Registers
 ///
@@ -110,29 +63,23 @@ pub struct Registers {
 ///
 /// ## Key Components:
 /// - `reg`: Contains all CPU registers (A, X, Y, P, S, PC)
-/// - `cycles`: Tracks the number of cycles executed (used for timing)
-/// - `nmi_pending`: Indicates if a Non-Maskable Interrupt is pending
-/// - `irq_pending`: Indicates if a standard Interrupt Request is pending
-/// - `is_running`: Tracks if the CPU is currently executing instructions
-///
-/// The CPU communicates with other NES components (PPU, APU, controllers)
-/// through memory-mapped I/O in the 0x2000-0x401F range.
 #[derive(Debug)]
-pub struct Cpu {
+pub struct Cpu<M: Memory> {
     /// CPU registers
     pub reg: Registers,
     /// Number of cycles remaining for current instruction
-    pub cycles: u32,
+    pub cycles: u64,
     /// Whether an NMI is pending
     pub nmi_pending: bool,
     /// Whether an IRQ is pending
     pub irq_pending: bool,
     /// Whether the CPU is in a valid state
     pub is_running: bool,
-    
     /// Memory bus reference
-    memory: Box<dyn Memory>,
+    memory: M,
 }
+
+use crate::nes::utils::MemoryError;
 
 /// Errors that can occur during CPU operations
 #[derive(Error, Debug)]
@@ -143,8 +90,8 @@ pub enum CpuError {
     #[error("CPU is in an invalid state")]
     InvalidState,
     
-    #[error("Memory access error: {0}")]
-    MemoryError(#[from] std::io::Error),
+    #[error("Memory error: {0}")]
+    MemoryError(#[from] MemoryError),
     
     #[error("Invalid addressing mode: {0:?}")]
     InvalidAddressingMode(AddressingMode),
@@ -157,6 +104,15 @@ pub enum CpuError {
     
     #[error("Stack underflow")]
     StackUnderflow,
+    
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl From<MemoryError> for CpuError {
+    fn from(error: MemoryError) -> Self {
+        CpuError::MemoryError(error)
+    }
 }
 
 impl Cpu {
@@ -245,14 +201,14 @@ impl Cpu {
     /// 4. Updates the cycle counter
     ///
     /// # Arguments
-    /// * `memory` - The memory interface for reading/writing
+    /// * `nes` - A mutable reference to the NES system for memory access
     ///
     /// # Returns
     /// The number of cycles the instruction took to execute
     ///
     /// # Errors
     /// Returns `CpuError` if an invalid opcode is encountered or memory access fails
-    pub fn step(&mut self, memory: &mut impl Memory) -> Result<u32, CpuError> {
+    pub fn step(&mut self, nes: &mut crate::nes::Nes) -> Result<u32, CpuError> {
         if !self.is_running {
             return Err(CpuError::InvalidState);
         }
@@ -260,7 +216,7 @@ impl Cpu {
         // Handle pending NMI (highest priority)
         if self.nmi_pending {
             self.nmi_pending = false;
-            let cycles = self.handle_interrupt(memory, 0xFFFA, false)?;
+            let cycles = self.handle_interrupt(nes, 0xFFFA, false)?;
             self.cycles += cycles as u32;
             return Ok(cycles as u32);
         }
@@ -268,23 +224,23 @@ impl Cpu {
         // Handle pending IRQ (if interrupts are enabled)
         if self.irq_pending && !self.reg.p.contains(StatusFlags::INTERRUPT_DISABLE) {
             self.irq_pending = false;
-            let cycles = self.handle_interrupt(memory, 0xFFFE, false)?;
+            let cycles = self.handle_interrupt(nes, 0xFFFE, false)?;
             self.cycles += cycles as u32;
             return Ok(cycles as u32);
         }
         
         // Fetch and execute instruction
-        let opcode = self.read_byte(memory, self.reg.pc)?;
+        let opcode = self.read_byte(nes, self.reg.pc)?;
         
         // For BRK instruction, we need to handle it specially
         let cycles = if opcode == 0x00 {  // BRK
             // BRK is a 2-byte instruction, but the PC is incremented by 2
             self.reg.pc = self.reg.pc.wrapping_add(1);
-            self.handle_interrupt(memory, 0xFFFE, true)?
+            self.handle_interrupt(nes, 0xFFFE, true)?
         } else {
             // Normal instruction execution
             self.reg.pc = self.reg.pc.wrapping_add(1);
-            self.execute_instruction(opcode, memory)?
+            self.execute_instruction(opcode, nes)?
         };
         
         self.cycles += cycles as u32;
@@ -295,19 +251,19 @@ impl Cpu {
     /// 
     /// # Arguments
     /// * `opcode` - The opcode to execute
-    /// * `memory` - The memory interface to use for memory operations
+    /// * `nes` - A mutable reference to the NES system for memory access
     /// 
     /// # Returns
     /// The number of cycles the instruction took to execute, or an error if the opcode is invalid
-    fn execute_instruction(&mut self, opcode: u8, memory: &mut impl Memory) -> CpuResult<u8> {
+    fn execute_instruction(&mut self, opcode: u8, nes: &mut crate::nes::Nes) -> CpuResult<u8> {
         match opcode {
             // Unofficial opcodes (enabled with the 'unofficial_ops' feature)
             #[cfg(feature = "unofficial_ops")]
-            0x0B | 0x2B => self.aac(memory),  // AAC (ANC)
+            0x0B | 0x2B => self.aac(nes),  // AAC (ANC)
             #[cfg(feature = "unofficial_ops")]
-            0x8B => self.ane(memory),         // ANE (XAA)
+            0x8B => self.ane(nes),         // ANE (XAA)
             #[cfg(feature = "unofficial_ops")]
-            0x6B => self.arr(memory),         // ARR
+            0x6B => self.arr(nes),         // ARR
             #[cfg(feature = "unofficial_ops")]
             0xA7 | 0xB7 | 0xAF | 0xBF | 0xA3 | 0xB3 => {
                 let mode = match opcode {
@@ -319,7 +275,7 @@ impl Cpu {
                     0xB3 => AddressingMode::IndirectY,
                     _ => unreachable!(),
                 };
-                self.lax(mode, memory)  // LAX
+                self.lax(mode, nes)  // LAX
             }
             #[cfg(feature = "unofficial_ops")]
             0x87 | 0x97 | 0x8F | 0x83 => {
@@ -417,42 +373,42 @@ impl Cpu {
                 self.isc(mode, memory)  // ISC (ISB)
             }
             // Load/Store Operations
-            0xA9 => self.lda(AddressingMode::Immediate, memory),    // LDA Immediate
-            0xA5 => self.lda(AddressingMode::ZeroPage, memory),     // LDA Zero Page
-            0xB5 => self.lda(AddressingMode::ZeroPageX, memory),    // LDA Zero Page,X
-            0xAD => self.lda(AddressingMode::Absolute, memory),     // LDA Absolute
-            0xBD => self.lda(AddressingMode::AbsoluteX, memory),    // LDA Absolute,X
-            0xB9 => self.lda(AddressingMode::AbsoluteY, memory),    // LDA Absolute,Y
-            0xA1 => self.lda(AddressingMode::IndirectX, memory),    // LDA (Indirect,X)
-            0xB1 => self.lda(AddressingMode::IndirectY, memory),    // LDA (Indirect),Y
+            0xA9 => self.lda(AddressingMode::Immediate, nes),    // LDA Immediate
+            0xA5 => self.lda(AddressingMode::ZeroPage, nes),     // LDA Zero Page
+            0xB5 => self.lda(AddressingMode::ZeroPageX, nes),    // LDA Zero Page,X
+            0xAD => self.lda(AddressingMode::Absolute, nes),     // LDA Absolute
+            0xBD => self.lda(AddressingMode::AbsoluteX, nes),    // LDA Absolute,X
+            0xB9 => self.lda(AddressingMode::AbsoluteY, nes),    // LDA Absolute,Y
+            0xA1 => self.lda(AddressingMode::IndirectX, nes),    // LDA (Indirect,X)
+            0xB1 => self.lda(AddressingMode::IndirectY, nes),    // LDA (Indirect),Y
             
-            0xA2 => self.ldx(AddressingMode::Immediate, memory),    // LDX Immediate
-            0xA6 => self.ldx(AddressingMode::ZeroPage, memory),     // LDX Zero Page
-            0xB6 => self.ldx(AddressingMode::ZeroPageY, memory),    // LDX Zero Page,Y
-            0xAE => self.ldx(AddressingMode::Absolute, memory),     // LDX Absolute
-            0xBE => self.ldx(AddressingMode::AbsoluteY, memory),    // LDX Absolute,Y
+            0xA2 => self.ldx(AddressingMode::Immediate, nes),    // LDX Immediate
+            0xA6 => self.ldx(AddressingMode::ZeroPage, nes),     // LDX Zero Page
+            0xB6 => self.ldx(AddressingMode::ZeroPageY, nes),    // LDX Zero Page,Y
+            0xAE => self.ldx(AddressingMode::Absolute, nes),     // LDX Absolute
+            0xBE => self.ldx(AddressingMode::AbsoluteY, nes),    // LDX Absolute,Y
             
-            0xA0 => self.ldy(AddressingMode::Immediate, memory),    // LDY Immediate
-            0xA4 => self.ldy(AddressingMode::ZeroPage, memory),     // LDY Zero Page
-            0xB4 => self.ldy(AddressingMode::ZeroPageX, memory),    // LDY Zero Page,X
-            0xAC => self.ldy(AddressingMode::Absolute, memory),     // LDY Absolute
-            0xBC => self.ldy(AddressingMode::AbsoluteX, memory),    // LDY Absolute,X
+            0xA0 => self.ldy(AddressingMode::Immediate, nes),    // LDY Immediate
+            0xA4 => self.ldy(AddressingMode::ZeroPage, nes),     // LDY Zero Page
+            0xB4 => self.ldy(AddressingMode::ZeroPageX, nes),    // LDY Zero Page,X
+            0xAC => self.ldy(AddressingMode::Absolute, nes),     // LDY Absolute
+            0xBC => self.ldy(AddressingMode::AbsoluteX, nes),    // LDY Absolute,X
             
-            0x85 => self.sta(AddressingMode::ZeroPage, memory),     // STA Zero Page
-            0x95 => self.sta(AddressingMode::ZeroPageX, memory),    // STA Zero Page,X
-            0x8D => self.sta(AddressingMode::Absolute, memory),     // STA Absolute
-            0x9D => self.sta(AddressingMode::AbsoluteX, memory),    // STA Absolute,X
-            0x99 => self.sta(AddressingMode::AbsoluteY, memory),    // STA Absolute,Y
-            0x81 => self.sta(AddressingMode::IndirectX, memory),    // STA (Indirect,X)
-            0x91 => self.sta(AddressingMode::IndirectY, memory),    // STA (Indirect),Y
+            0x85 => self.sta(AddressingMode::ZeroPage, nes),     // STA Zero Page
+            0x95 => self.sta(AddressingMode::ZeroPageX, nes),    // STA Zero Page,X
+            0x8D => self.sta(AddressingMode::Absolute, nes),     // STA Absolute
+            0x9D => self.sta(AddressingMode::AbsoluteX, nes),    // STA Absolute,X
+            0x99 => self.sta(AddressingMode::AbsoluteY, nes),    // STA Absolute,Y
+            0x81 => self.sta(AddressingMode::IndirectX, nes),    // STA (Indirect,X)
+            0x91 => self.sta(AddressingMode::IndirectY, nes),    // STA (Indirect),Y
             
-            0x86 => self.stx(AddressingMode::ZeroPage, memory),     // STX Zero Page
-            0x96 => self.stx(AddressingMode::ZeroPageY, memory),    // STX Zero Page,Y
-            0x8E => self.stx(AddressingMode::Absolute, memory),     // STX Absolute
+            0x86 => self.stx(AddressingMode::ZeroPage, nes),     // STX Zero Page
+            0x96 => self.stx(AddressingMode::ZeroPageY, nes),    // STX Zero Page,Y
+            0x8E => self.stx(AddressingMode::Absolute, nes),     // STX Absolute
             
-            0x84 => self.sty(AddressingMode::ZeroPage, memory),     // STY Zero Page
-            0x94 => self.sty(AddressingMode::ZeroPageX, memory),    // STY Zero Page,X
-            0x8C => self.sty(AddressingMode::Absolute, memory),     // STY Absolute
+            0x84 => self.sty(AddressingMode::ZeroPage, nes),     // STY Zero Page
+            0x94 => self.sty(AddressingMode::ZeroPageX, nes),    // STY Zero Page,X
+            0x8C => self.sty(AddressingMode::Absolute, nes),     // STY Absolute
             
             // Register Transfers
             0xAA => self.tax(),                                     // TAX
@@ -463,136 +419,135 @@ impl Cpu {
             0x9A => self.txs(),                                     // TXS
             
             // Stack Operations
-            0x48 => self.pha(memory),                               // PHA
-            0x08 => self.php(memory),                               // PHP
-            0x68 => self.pla(memory),                               // PLA
-            0x28 => self.plp(memory),                               // PLP
+            0x48 => self.pha(nes),                               // PHA
+            0x08 => self.php(nes),                               // PHP
+            0x68 => self.pla(nes),                               // PLA
+            0x28 => self.plp(nes),                               // PLP
             
             // Logical Operations
-            0x29 => self.and(AddressingMode::Immediate, memory),    // AND Immediate
-            0x25 => self.and(AddressingMode::ZeroPage, memory),     // AND Zero Page
-            0x35 => self.and(AddressingMode::ZeroPageX, memory),    // AND Zero Page,X
-            0x2D => self.and(AddressingMode::Absolute, memory),     // AND Absolute
-            0x3D => self.and(AddressingMode::AbsoluteX, memory),    // AND Absolute,X
-            0x39 => self.and(AddressingMode::AbsoluteY, memory),    // AND Absolute,Y
-            0x21 => self.and(AddressingMode::IndirectX, memory),    // AND (Indirect,X)
-            0x31 => self.and(AddressingMode::IndirectY, memory),    // AND (Indirect),Y
+            0x29 => self.and(AddressingMode::Immediate, nes),    // AND Immediate
+            0x25 => self.and(AddressingMode::ZeroPage, nes),     // AND Zero Page
+            0x35 => self.and(AddressingMode::ZeroPageX, nes),    // AND Zero Page,X
+            0x2D => self.and(AddressingMode::Absolute, nes),     // AND Absolute
+            0x3D => self.and(AddressingMode::AbsoluteX, nes),    // AND Absolute,X
+            0x39 => self.and(AddressingMode::AbsoluteY, nes),    // AND Absolute,Y
+            0x21 => self.and(AddressingMode::IndirectX, nes),    // AND (Indirect,X)
+            0x31 => self.and(AddressingMode::IndirectY, nes),    // AND (Indirect),Y
             
-            0x49 => self.eor(AddressingMode::Immediate, memory),    // EOR Immediate
-            0x45 => self.eor(AddressingMode::ZeroPage, memory),     // EOR Zero Page
-            0x55 => self.eor(AddressingMode::ZeroPageX, memory),    // EOR Zero Page,X
-            0x4D => self.eor(AddressingMode::Absolute, memory),     // EOR Absolute
-            0x5D => self.eor(AddressingMode::AbsoluteX, memory),    // EOR Absolute,X
-            0x59 => self.eor(AddressingMode::AbsoluteY, memory),    // EOR Absolute,Y
-            0x41 => self.eor(AddressingMode::IndirectX, memory),    // EOR (Indirect,X)
-            0x51 => self.eor(AddressingMode::IndirectY, memory),    // EOR (Indirect),Y
+            0x49 => self.eor(AddressingMode::Immediate, nes),    // EOR Immediate
+            0x45 => self.eor(AddressingMode::ZeroPage, nes),     // EOR Zero Page
+            0x55 => self.eor(AddressingMode::ZeroPageX, nes),    // EOR Zero Page,X
+            0x4D => self.eor(AddressingMode::Absolute, nes),     // EOR Absolute
+            0x5D => self.eor(AddressingMode::AbsoluteX, nes),    // EOR Absolute,X
+            0x59 => self.eor(AddressingMode::AbsoluteY, nes),    // EOR Absolute,Y
+            0x41 => self.eor(AddressingMode::IndirectX, nes),    // EOR (Indirect,X)
+            0x51 => self.eor(AddressingMode::IndirectY, nes),    // EOR (Indirect),Y
             
-            0x09 => self.ora(AddressingMode::Immediate, memory),    // ORA Immediate
-            0x05 => self.ora(AddressingMode::ZeroPage, memory),     // ORA Zero Page
-            0x15 => self.ora(AddressingMode::ZeroPageX, memory),    // ORA Zero Page,X
-            0x0D => self.ora(AddressingMode::Absolute, memory),     // ORA Absolute
-            0x1D => self.ora(AddressingMode::AbsoluteX, memory),    // ORA Absolute,X
-            0x19 => self.ora(AddressingMode::AbsoluteY, memory),    // ORA Absolute,Y
-            0x01 => self.ora(AddressingMode::IndirectX, memory),    // ORA (Indirect,X)
-            0x11 => self.ora(AddressingMode::IndirectY, memory),    // ORA (Indirect),Y
+            0x09 => self.ora(AddressingMode::Immediate, nes),    // ORA Immediate
+            0x05 => self.ora(AddressingMode::ZeroPage, nes),     // ORA Zero Page
+            0x15 => self.ora(AddressingMode::ZeroPageX, nes),    // ORA Zero Page,X
+            0x0D => self.ora(AddressingMode::Absolute, nes),     // ORA Absolute
+            0x1D => self.ora(AddressingMode::AbsoluteX, nes),    // ORA Absolute,X
+            0x19 => self.ora(AddressingMode::AbsoluteY, nes),    // ORA Absolute,Y
+            0x01 => self.ora(AddressingMode::IndirectX, nes),    // ORA (Indirect,X)
             
-            0x24 => self.bit(AddressingMode::ZeroPage, memory),     // BIT Zero Page
-            0x2C => self.bit(AddressingMode::Absolute, memory),     // BIT Absolute
+            0x24 => self.bit(AddressingMode::ZeroPage, nes),     // BIT Zero Page
+            0x2C => self.bit(AddressingMode::Absolute, nes),     // BIT Absolute
             
             // Arithmetic Operations
-            0x69 => self.adc(AddressingMode::Immediate, memory),    // ADC Immediate
-            0x65 => self.adc(AddressingMode::ZeroPage, memory),     // ADC Zero Page
-            0x75 => self.adc(AddressingMode::ZeroPageX, memory),    // ADC Zero Page,X
-            0x6D => self.adc(AddressingMode::Absolute, memory),     // ADC Absolute
-            0x7D => self.adc(AddressingMode::AbsoluteX, memory),    // ADC Absolute,X
-            0x79 => self.adc(AddressingMode::AbsoluteY, memory),    // ADC Absolute,Y
-            0x61 => self.adc(AddressingMode::IndirectX, memory),    // ADC (Indirect,X)
-            0x71 => self.adc(AddressingMode::IndirectY, memory),    // ADC (Indirect),Y
+            0x69 => self.adc(AddressingMode::Immediate, nes),    // ADC Immediate
+            0x65 => self.adc(AddressingMode::ZeroPage, nes),     // ADC Zero Page
+            0x75 => self.adc(AddressingMode::ZeroPageX, nes),    // ADC Zero Page,X
+            0x6D => self.adc(AddressingMode::Absolute, nes),     // ADC Absolute
+            0x7D => self.adc(AddressingMode::AbsoluteX, nes),    // ADC Absolute,X
+            0x79 => self.adc(AddressingMode::AbsoluteY, nes),    // ADC Absolute,Y
+            0x61 => self.adc(AddressingMode::IndirectX, nes),    // ADC (Indirect,X)
+            0x71 => self.adc(AddressingMode::IndirectY, nes),    // ADC (Indirect),Y
             
-            0xE9 => self.sbc(AddressingMode::Immediate, memory),    // SBC Immediate
-            0xE5 => self.sbc(AddressingMode::ZeroPage, memory),     // SBC Zero Page
-            0xF5 => self.sbc(AddressingMode::ZeroPageX, memory),    // SBC Zero Page,X
-            0xED => self.sbc(AddressingMode::Absolute, memory),     // SBC Absolute
-            0xFD => self.sbc(AddressingMode::AbsoluteX, memory),    // SBC Absolute,X
-            0xF9 => self.sbc(AddressingMode::AbsoluteY, memory),    // SBC Absolute,Y
-            0xE1 => self.sbc(AddressingMode::IndirectX, memory),    // SBC (Indirect,X)
-            0xF1 => self.sbc(AddressingMode::IndirectY, memory),    // SBC (Indirect),Y
+            0xE9 => self.sbc(AddressingMode::Immediate, nes),    // SBC Immediate
+            0xE5 => self.sbc(AddressingMode::ZeroPage, nes),     // SBC Zero Page
+            0xF5 => self.sbc(AddressingMode::ZeroPageX, nes),    // SBC Zero Page,X
+            0xED => self.sbc(AddressingMode::Absolute, nes),     // SBC Absolute
+            0xFD => self.sbc(AddressingMode::AbsoluteX, nes),    // SBC Absolute,X
+            0xF9 => self.sbc(AddressingMode::AbsoluteY, nes),    // SBC Absolute,Y
+            0xE1 => self.sbc(AddressingMode::IndirectX, nes),    // SBC (Indirect,X)
+            0xF1 => self.sbc(AddressingMode::IndirectY, nes),    // SBC (Indirect),Y
             
-            0xC9 => self.cmp(AddressingMode::Immediate, memory),    // CMP Immediate
-            0xC5 => self.cmp(AddressingMode::ZeroPage, memory),     // CMP Zero Page
-            0xD5 => self.cmp(AddressingMode::ZeroPageX, memory),    // CMP Zero Page,X
-            0xCD => self.cmp(AddressingMode::Absolute, memory),     // CMP Absolute
-            0xDD => self.cmp(AddressingMode::AbsoluteX, memory),    // CMP Absolute,X
-            0xD9 => self.cmp(AddressingMode::AbsoluteY, memory),    // CMP Absolute,Y
-            0xC1 => self.cmp(AddressingMode::IndirectX, memory),    // CMP (Indirect,X)
-            0xD1 => self.cmp(AddressingMode::IndirectY, memory),    // CMP (Indirect),Y
+            0xC9 => self.cmp(AddressingMode::Immediate, nes),    // CMP Immediate
+            0xC5 => self.cmp(AddressingMode::ZeroPage, nes),     // CMP Zero Page
+            0xD5 => self.cmp(AddressingMode::ZeroPageX, nes),    // CMP Zero Page,X
+            0xCD => self.cmp(AddressingMode::Absolute, nes),     // CMP Absolute
+            0xDD => self.cmp(AddressingMode::AbsoluteX, nes),    // CMP Absolute,X
+            0xD9 => self.cmp(AddressingMode::AbsoluteY, nes),    // CMP Absolute,Y
+            0xC1 => self.cmp(AddressingMode::IndirectX, nes),    // CMP (Indirect,X)
+            0xD1 => self.cmp(AddressingMode::IndirectY, nes),    // CMP (Indirect),Y
             
-            0xE0 => self.cpx(AddressingMode::Immediate, memory),    // CPX Immediate
-            0xE4 => self.cpx(AddressingMode::ZeroPage, memory),     // CPX Zero Page
-            0xEC => self.cpx(AddressingMode::Absolute, memory),     // CPX Absolute
+            0xE0 => self.cpx(AddressingMode::Immediate, nes),    // CPX Immediate
+            0xE4 => self.cpx(AddressingMode::ZeroPage, nes),     // CPX Zero Page
+            0xEC => self.cpx(AddressingMode::Absolute, nes),     // CPX Absolute
             
-            0xC0 => self.cpy(AddressingMode::Immediate, memory),    // CPY Immediate
-            0xC4 => self.cpy(AddressingMode::ZeroPage, memory),     // CPY Zero Page
-            0xCC => self.cpy(AddressingMode::Absolute, memory),     // CPY Absolute
+            0xC0 => self.cpy(AddressingMode::Immediate, nes),    // CPY Immediate
+            0xC4 => self.cpy(AddressingMode::ZeroPage, nes),     // CPY Zero Page
+            0xCC => self.cpy(AddressingMode::Absolute, nes),     // CPY Absolute
             
             // Increments & Decrements
-            0xE6 => self.inc(AddressingMode::ZeroPage, memory),     // INC Zero Page
-            0xF6 => self.inc(AddressingMode::ZeroPageX, memory),    // INC Zero Page,X
-            0xEE => self.inc(AddressingMode::Absolute, memory),     // INC Absolute
-            0xFE => self.inc(AddressingMode::AbsoluteX, memory),    // INC Absolute,X
+            0xE6 => self.inc(AddressingMode::ZeroPage, nes),     // INC Zero Page
+            0xF6 => self.inc(AddressingMode::ZeroPageX, nes),    // INC Zero Page,X
+            0xEE => self.inc(AddressingMode::Absolute, nes),     // INC Absolute
+            0xFE => self.inc(AddressingMode::AbsoluteX, nes),    // INC Absolute,X
             
             0xE8 => self.inx(),                                     // INX
             0xC8 => self.iny(),                                     // INY
             
-            0xC6 => self.dec(AddressingMode::ZeroPage, memory),     // DEC Zero Page
-            0xD6 => self.dec(AddressingMode::ZeroPageX, memory),    // DEC Zero Page,X
-            0xCE => self.dec(AddressingMode::Absolute, memory),     // DEC Absolute
-            0xDE => self.dec(AddressingMode::AbsoluteX, memory),    // DEC Absolute,X
+            0xC6 => self.dec(AddressingMode::ZeroPage, nes),     // DEC Zero Page
+            0xD6 => self.dec(AddressingMode::ZeroPageX, nes),    // DEC Zero Page,X
+            0xCE => self.dec(AddressingMode::Absolute, nes),     // DEC Absolute
+            0xDE => self.dec(AddressingMode::AbsoluteX, nes),    // DEC Absolute,X
             
             0xCA => self.dex(),                                     // DEX
             0x88 => self.dey(),                                     // DEY
             
             // Shifts
             0x0A => self.asl_acc(),                                 // ASL Accumulator
-            0x06 => self.asl(AddressingMode::ZeroPage, memory),     // ASL Zero Page
-            0x16 => self.asl(AddressingMode::ZeroPageX, memory),    // ASL Zero Page,X
-            0x0E => self.asl(AddressingMode::Absolute, memory),     // ASL Absolute
-            0x1E => self.asl(AddressingMode::AbsoluteX, memory),    // ASL Absolute,X
+            0x06 => self.asl(AddressingMode::ZeroPage, nes),     // ASL Zero Page
+            0x16 => self.asl(AddressingMode::ZeroPageX, nes),    // ASL Zero Page,X
+            0x0E => self.asl(AddressingMode::Absolute, nes),     // ASL Absolute
+            0x1E => self.asl(AddressingMode::AbsoluteX, nes),    // ASL Absolute,X
             
             0x4A => self.lsr_acc(),                                 // LSR Accumulator
-            0x46 => self.lsr(AddressingMode::ZeroPage, memory),     // LSR Zero Page
-            0x56 => self.lsr(AddressingMode::ZeroPageX, memory),    // LSR Zero Page,X
-            0x4E => self.lsr(AddressingMode::Absolute, memory),     // LSR Absolute
-            0x5E => self.lsr(AddressingMode::AbsoluteX, memory),    // LSR Absolute,X
+            0x46 => self.lsr(AddressingMode::ZeroPage, nes),     // LSR Zero Page
+            0x56 => self.lsr(AddressingMode::ZeroPageX, nes),    // LSR Zero Page,X
+            0x4E => self.lsr(AddressingMode::Absolute, nes),     // LSR Absolute
+            0x5E => self.lsr(AddressingMode::AbsoluteX, nes),    // LSR Absolute,X
             
             0x2A => self.rol_acc(),                                 // ROL Accumulator
-            0x26 => self.rol(AddressingMode::ZeroPage, memory),     // ROL Zero Page
-            0x36 => self.rol(AddressingMode::ZeroPageX, memory),    // ROL Zero Page,X
-            0x2E => self.rol(AddressingMode::Absolute, memory),     // ROL Absolute
-            0x3E => self.rol(AddressingMode::AbsoluteX, memory),    // ROL Absolute,X
+            0x26 => self.rol(AddressingMode::ZeroPage, nes),     // ROL Zero Page
+            0x36 => self.rol(AddressingMode::ZeroPageX, nes),    // ROL Zero Page,X
+            0x2E => self.rol(AddressingMode::Absolute, nes),     // ROL Absolute
+            0x3E => self.rol(AddressingMode::AbsoluteX, nes),    // ROL Absolute,X
             
             0x6A => self.ror_acc(),                                 // ROR Accumulator
-            0x66 => self.ror(AddressingMode::ZeroPage, memory),     // ROR Zero Page
-            0x76 => self.ror(AddressingMode::ZeroPageX, memory),    // ROR Zero Page,X
-            0x6E => self.ror(AddressingMode::Absolute, memory),     // ROR Absolute
-            0x7E => self.ror(AddressingMode::AbsoluteX, memory),    // ROR Absolute,X
+            0x66 => self.ror(AddressingMode::ZeroPage, nes),     // ROR Zero Page
+            0x76 => self.ror(AddressingMode::ZeroPageX, nes),    // ROR Zero Page,X
+            0x6E => self.ror(AddressingMode::Absolute, nes),     // ROR Absolute
+            0x7E => self.ror(AddressingMode::AbsoluteX, nes),    // ROR Absolute,X
             
             // Jumps & Calls
-            0x4C => self.jmp_absolute(memory),                      // JMP Absolute
-            0x6C => self.jmp_indirect(memory),                      // JMP Indirect
-            0x20 => self.jsr(memory),                               // JSR
-            0x60 => self.rts(memory),                               // RTS
-            0x40 => self.rti(memory),                               // RTI
+            0x4C => self.jmp(AddressingMode::Absolute, nes),     // JMP Absolute
+            0x6C => self.jmp(AddressingMode::Indirect, nes),     // JMP Indirect
+            0x20 => self.jsr(nes),                               // JSR
+            0x60 => self.rts(nes),                               // RTS
+            0x40 => self.rti(nes),                               // RTI
             
             // Branches
-            0x90 => self.branch(!self.reg.p.contains(StatusFlags::CARRY), memory),     // BCC
-            0xB0 => self.branch(self.reg.p.contains(StatusFlags::CARRY), memory),      // BCS
-            0xF0 => self.branch(self.reg.p.contains(StatusFlags::ZERO), memory),       // BEQ
-            0x30 => self.branch(self.reg.p.contains(StatusFlags::NEGATIVE), memory),   // BMI
-            0xD0 => self.branch(!self.reg.p.contains(StatusFlags::ZERO), memory),      // BNE
-            0x10 => self.branch(!self.reg.p.contains(StatusFlags::NEGATIVE), memory),  // BPL
-            0x50 => self.branch(!self.reg.p.contains(StatusFlags::OVERFLOW), memory),  // BVC
-            0x70 => self.branch(self.reg.p.contains(StatusFlags::OVERFLOW), memory),   // BVS
+            0x90 => self.branch(!self.reg.p.contains(StatusFlags::CARRY), nes),     // BCC
+            0xB0 => self.branch(self.reg.p.contains(StatusFlags::CARRY), nes),      // BCS
+            0xF0 => self.branch(self.reg.p.contains(StatusFlags::ZERO), nes),       // BEQ
+            0x30 => self.branch(self.reg.p.contains(StatusFlags::NEGATIVE), nes),   // BMI
+            0xD0 => self.branch(!self.reg.p.contains(StatusFlags::ZERO), nes),      // BNE
+            0x10 => self.branch(!self.reg.p.contains(StatusFlags::NEGATIVE), nes),  // BPL
+            0x50 => self.branch(!self.reg.p.contains(StatusFlags::OVERFLOW), nes),  // BVC
+            0x70 => self.branch(self.reg.p.contains(StatusFlags::OVERFLOW), nes),   // BVS
             
             // Status Flag Changes
             0x18 => self.clc(),                                                       // CLC
@@ -604,26 +559,40 @@ impl Cpu {
             0x78 => self.sei(),                                                       // SEI
             
             // System Functions
-            0x00 => self.brk(memory),                                                 // BRK
+            0x00 => self.brk(nes),                                                 // BRK
             0xEA => Ok(2),                                                            // NOP
             
             // Unofficial/Illegal Opcodes (stubs for now)
-            0x0B | 0x2B => self.aac(memory),                                      // AAC (ANC)
-            0x8B => self.ane(memory),                                                 // ANE (XAA)
-            0x4B => self.asr(memory),                                                 // ASR (ALR)
-            0x6B => self.arr(memory),                                                 // ARR
-            0xCB => self.axs(memory),                                                 // AXS (SBX)
-            0xE2 => self.dop(memory),                                                 // DOP (NOP)
-            0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2 | 0xD2 | 0xF2 => 
-                self.stp(),                                                          // STP (KIL)
-            0xBB => self.las(memory),                                                 // LAS (LAX)
-            0xA7 => self.lax(AddressingMode::ZeroPage, memory),                      // LAX Zero Page
-            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => self.nop(memory),            // NOP Implied
-            0x27 => self.rla(AddressingMode::ZeroPage, memory),                      // RLA Zero Page
-            0x37 => self.rla(AddressingMode::ZeroPageX, memory),                     // RLA Zero Page,X
-            0x2F => self.rla(AddressingMode::Absolute, memory),                      // RLA Absolute
-            0x3F => self.rla(AddressingMode::AbsoluteX, memory),                     // RLA Absolute,X
-            0x3B => self.rla(AddressingMode::AbsoluteY, memory),                     // RLA Absolute,Y
+            0x0B | 0x2B => self.aac(nes),                                      // AAC (ANC)
+            0x8B => self.ane(nes),                                                 // ANE (XAA)
+            0x6B => self.arr(nes),                                                 // ARR
+            0xCB => self.axs(AddressingMode::Immediate, nes),                      // AXS (SBX)
+            0xE2 => self.dop(AddressingMode::Immediate, nes),                      // DOP (NOP)
+            0x04 | 0x44 | 0x64 => self.nop(nes),    // NOP Zero Page
+            0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => self.nop(nes), // NOP Zero Page,X
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => self.nop(nes), // NOP Immediate
+            0x0C => self.nop(nes),                  // NOP Absolute
+            0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => self.nop(nes), // NOP Absolute,X
+            0xA7 => self.las(AddressingMode::ZeroPage, nes),    // LAS (Unofficial)
+            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => self.nop(nes), // NOP Implied
+            0x27 => self.rla(AddressingMode::ZeroPage, nes),                      // RLA Zero Page
+            0x37 => self.rla(AddressingMode::ZeroPageX, nes),                     // RLA Zero Page,X
+            0x2F => self.rla(AddressingMode::Absolute, nes),                      // RLA Absolute
+            0x3F => self.rla(AddressingMode::AbsoluteX, nes),                     // RLA Absolute,X
+            0x3B => self.rla(AddressingMode::AbsoluteY, nes),                     // RLA Absolute,Y
+            0x23 => self.rla(AddressingMode::IndirectX, nes),                     // RLA (Indirect,X)
+            0x33 => self.rla(AddressingMode::IndirectY, nes),                     // RLA (Indirect),Y
+            0x67 => self.rra(AddressingMode::ZeroPage, nes),                      // RRA Zero Page
+            0x77 => self.rra(AddressingMode::ZeroPageX, nes),                     // RRA Zero Page,X
+            0x6F => self.rra(AddressingMode::Absolute, nes),                      // RRA Absolute
+            0x7F => self.rra(AddressingMode::AbsoluteX, nes),                     // RRA Absolute,X
+            0x7B => self.rra(AddressingMode::AbsoluteY, nes),                     // RRA Absolute,Y
+            0x63 => self.rra(AddressingMode::IndirectX, nes),                     // RRA (Indirect,X)
+            0x73 => self.rra(AddressingMode::IndirectY, nes),                     // RRA (Indirect),Y
+            0x87 => self.shx(AddressingMode::ZeroPage, nes),                      // SHX/SAX Zero Page
+            0x97 => self.shx(AddressingMode::ZeroPageY, nes),                     // SHX/SAX Zero Page,Y
+            0x8F => self.shx(AddressingMode::Absolute, nes),                      // SHX/SAX Absolute
+            0x83 => self.shx(AddressingMode::IndirectX, nes),                     // SHX/SAX (Indirect,X)
             0x23 => self.rla(AddressingMode::IndirectX, memory),                     // RLA (Indirect,X)
             0x33 => self.rla(AddressingMode::IndirectY, memory),                     // RLA (Indirect),Y
             0x67 => self.rra(AddressingMode::ZeroPage, memory),                      // RRA Zero Page
@@ -633,11 +602,11 @@ impl Cpu {
             0x7B => self.rra(AddressingMode::AbsoluteY, memory),                     // RRA Absolute,Y
             0x63 => self.rra(AddressingMode::IndirectX, memory),                     // RRA (Indirect,X)
             0x73 => self.rra(AddressingMode::IndirectY, memory),                     // RRA (Indirect),Y
-            0x87 => self.sax(AddressingMode::ZeroPage, memory),                      // SAX Zero Page
-            0x97 => self.sax(AddressingMode::ZeroPageY, memory),                     // SAX Zero Page,Y
-            0x8F => self.sax(AddressingMode::Absolute, memory),                      // SAX Absolute
-            0x83 => self.sax(AddressingMode::IndirectX, memory),                     // SAX (Indirect,X)
-            0xEB => self.sbc(AddressingMode::Immediate, memory),                     // SBC (SBC with same opcode as 0xE9)
+            0x87 => self.shx(AddressingMode::ZeroPage, memory),                      // SHX/SAX Zero Page
+            0x97 => self.shx(AddressingMode::ZeroPageY, memory),                     // SHX/SAX Zero Page,Y
+            0x8F => self.shx(AddressingMode::Absolute, memory),                      // SHX/SAX Absolute
+            0x83 => self.shx(AddressingMode::IndirectX, memory),                     // SHX/SAX (Indirect,X)
+            
             0x07 => self.slo(AddressingMode::ZeroPage, memory),                      // SLO Zero Page
             0x17 => self.slo(AddressingMode::ZeroPageX, memory),                     // SLO Zero Page,X
             0x0F => self.slo(AddressingMode::Absolute, memory),                      // SLO Absolute
@@ -645,6 +614,7 @@ impl Cpu {
             0x1B => self.slo(AddressingMode::AbsoluteY, memory),                     // SLO Absolute,Y
             0x03 => self.slo(AddressingMode::IndirectX, memory),                     // SLO (Indirect,X)
             0x13 => self.slo(AddressingMode::IndirectY, memory),                     // SLO (Indirect),Y
+            
             0x47 => self.sre(AddressingMode::ZeroPage, memory),                      // SRE Zero Page
             0x57 => self.sre(AddressingMode::ZeroPageX, memory),                     // SRE Zero Page,X
             0x4F => self.sre(AddressingMode::Absolute, memory),                      // SRE Absolute
@@ -1500,68 +1470,10 @@ impl Cpu {
     // =============================================
     // Unofficial/Illegal Opcodes
     // =============================================
+    // These opcodes are implemented in the unofficial_ops module
+    // and are conditionally included with the 'unofficial_ops' feature
     
-    /// Arithmetic Shift Right (ASR/ALR)
-    /// Performs a logical AND between the accumulator and a value from memory,
-    /// then shifts the result right by one bit.
-    fn alr(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
-        let value = memory.read_byte(self.reg.pc).map_err(CpuError::MemoryError)?;
-        self.reg.pc = self.reg.pc.wrapping_add(1);
-        let result = self.reg.a & value;
-        let carry = (result & 0x01) != 0;
-        let result = result >> 1;
-        
-        self.reg.a = result;
-        self.reg.p.set(StatusFlags::CARRY, carry);
-        self.reg.p.set(StatusFlags::ZERO, result == 0);
-        self.reg.p.set(StatusFlags::NEGATIVE, (result & 0x80) != 0);
-        
-        Ok(2)  // Base cycles
-    }
-    
-    /// ASR/ALR instruction (alias for alr, as they're the same operation)
-    pub fn asr(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
-        let value = memory.read_byte(self.reg.pc).map_err(CpuError::MemoryError)?;
-        self.reg.pc = self.reg.pc.wrapping_add(1);
-        let result = self.reg.a & value;
-        let carry = (result & 0x01) != 0;
-        let result = result >> 1;
-        
-        self.reg.a = result;
-        self.reg.p.set(StatusFlags::CARRY, carry);
-        self.reg.p.set(StatusFlags::ZERO, result == 0);
-        self.reg.p.set(StatusFlags::NEGATIVE, (result & 0x80) != 0);
-        
-        Ok(2)  // Base cycles
-    }
-    
-    /// XAS (SHX) - AND X register with the high byte of the target address + 1
-    /// then AND with A, store in memory
-    /// This is an undocumented instruction with inconsistent behavior across 6502 variants
-    pub fn xas(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
-        let (addr, page_crossed, extra_cycles) = self.get_operand_address(mode, memory)?;
-        
-        // The exact behavior varies between CPU revisions
-        // This is a common implementation that works for most cases
-        let value = self.reg.x & self.reg.a & ((addr >> 8) as u8).wrapping_add(1);
-        
-        // Write the result to memory
-        memory.write_byte(addr, value)?;
-        
-        // Update flags
-        self.update_zero_and_negative_flags(value);
-        
-        // Return cycle count (base + page crossing penalty if any)
-        match mode {
-            AddressingMode::AbsoluteX | AddressingMode::AbsoluteY => Ok(5 + extra_cycles),
-            _ => Ok(5),
-        }
-    }
-    
-    // Placeholder for other unimplemented unofficial opcodes
-    fn nop(&mut self, _memory: &mut impl Memory) -> CpuResult<u8> {
-        Ok(2) // Default 2 cycles for NOP
-    }
+    // NOP implementation is in the unofficial_ops_consolidated module
     
     /// PHA - Push Accumulator
     fn pha(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
@@ -1590,23 +1502,11 @@ impl Cpu {
         // Clear Break and Unused flags when pulling
         self.reg.p = StatusFlags::from_bits_truncate(status) & !(StatusFlags::BREAK | StatusFlags::UNUSED);
         // Ensure Unused flag is always set
-        self.reg.p.insert(StatusFlags::UNUSED);
-        Ok(4)
-    }
     
-    // Helper methods for memory access
-    fn read_byte(&self, memory: &impl Memory, addr: u16) -> Result<u8, CpuError> {
-        memory.read_byte(addr).map_err(CpuError::MemoryError)
-    }
-    
-    fn write_byte(&self, memory: &mut impl Memory, addr: u16, value: u8) -> Result<(), CpuError> {
-        memory.write_byte(addr, value).map_err(CpuError::MemoryError)
-    }
-    
-    fn read_word(&self, memory: &impl Memory, addr: u16) -> CpuResult<u16> {
-        let lo = self.read_byte(memory, addr)?;
-        let hi = self.read_byte(memory, addr.wrapping_add(1))?;
-        Ok(u16::from_le_bytes([lo, hi]))
+        // Clear the BREAK flag in the status register
+        self.reg.p.remove(StatusFlags::BREAK);
+        
+        Ok(6)
     }
     
     fn push_byte(&mut self, memory: &mut impl Memory, value: u8) -> Result<(), CpuError> {
@@ -1663,28 +1563,47 @@ impl Cpu {
     // Jump & Subroutine Operations
     // =============================================
     
-    /// JMP - Jump to new location (Absolute)
-    fn jmp_absolute(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
-        let addr = memory.read_word(self.reg.pc)?;
-        self.reg.pc = addr;
-        Ok(3)
-    }
-    
-    /// JMP - Jump to new location (Indirect)
-    fn jmp_indirect(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
-        let ptr = memory.read_word(self.reg.pc)?;
-        
-        // Handle 6502 page boundary bug
-        let lo = memory.read_byte(ptr)? as u16;
-        let hi_ptr = if (ptr & 0x00FF) == 0x00FF {
-            ptr & 0xFF00  // Wrap around within page
-        } else {
-            ptr.wrapping_add(1)
-        };
-        let hi = memory.read_byte(hi_ptr)? as u16;
-        
-        self.reg.pc = (hi << 8) | lo;
-        Ok(5)
+    /// JMP - Jump to New Location
+    /// 
+    /// JMP sets the program counter to the address specified by the operand.
+    /// 
+    /// # Arguments
+    /// * `mode` - The addressing mode to use
+    /// * `memory` - The memory interface
+    /// 
+    /// # Returns
+    /// The number of cycles the instruction took to execute
+    /// 
+    /// # Errors
+    /// Returns `CpuError` if the addressing mode is invalid or memory access fails
+    fn jmp(&mut self, mode: AddressingMode, memory: &mut impl Memory) -> CpuResult<u8> {
+        match mode {
+            AddressingMode::Absolute => {
+                // Read the 16-bit address
+                let addr = self.read_word(memory, self.reg.pc)?;
+                self.reg.pc = addr;
+                Ok(3)
+            },
+            AddressingMode::Indirect => {
+                // Read the 16-bit address of the target address
+                let addr = self.read_word(memory, self.reg.pc)?;
+                
+                // Handle the 6502 page boundary bug
+                let addr_indirect = if (addr & 0x00FF) == 0x00FF {
+                    // If the low byte is 0xFF, the high byte is read from the same page
+                    let lo = self.read_byte(memory, addr)? as u16;
+                    let hi = self.read_byte(memory, addr & 0xFF00)? as u16;
+                    (hi << 8) | lo
+                } else {
+                    // Normal case - read 16-bit value
+                    self.read_word(memory, addr)?
+                };
+                
+                self.reg.pc = addr_indirect;
+                Ok(5)
+            },
+            _ => Err(CpuError::InvalidAddressingMode(mode)),
+        }
     }
     
     /// JSR - Jump to Subroutine
@@ -1726,14 +1645,12 @@ impl Cpu {
 }
 
 // Implement Memory trait for Cpu to allow direct memory access
-impl Memory for Cpu {
-    fn read_byte(&self, addr: u16) -> std::io::Result<u8> {
-        // Delegate to the memory bus
+impl<M: Memory> Memory for Cpu<M> {
+    fn read_byte(&self, addr: u16) -> Result<u8, MemoryError> {
         self.memory.read_byte(addr)
     }
-    
-    fn write_byte(&mut self, addr: u16, value: u8) -> std::io::Result<()> {
-        // Delegate to the memory bus
+
+    fn write_byte(&mut self, addr: u16, value: u8) -> Result<(), MemoryError> {
         self.memory.write_byte(addr, value)
     }
     

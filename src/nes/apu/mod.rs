@@ -90,18 +90,16 @@ impl Apu {
     }
     
     /// Execute one APU cycle (1 CPU cycle = 2 APU cycles)
-    pub fn tick(&mut self, memory: &impl Memory) -> u8 {
+    pub fn tick(&mut self, memory: &mut dyn Memory) -> Result<u8, crate::nes::utils::MemoryError> {
         // Clock the frame counter and audio channels every other CPU cycle (APU runs at CPU rate / 2)
         if self.cycle % 2 == 0 {
             self.clock_frame_counter();
         }
         
         // Clock the DMC channel (runs at CPU rate)
-        let _dmc_output = if self.dmc.enabled {
-            self.dmc.clock(memory)
-        } else {
-            0
-        };
+        if self.dmc.enabled {
+            self.dmc.clock(memory)?;
+        }
         
         // Generate and return the current audio sample
         let sample = self.generate_sample();
@@ -109,7 +107,7 @@ impl Apu {
         // Update cycle counter
         self.cycle = self.cycle.wrapping_add(1);
         
-        sample
+        Ok(sample)
     }
     
     /// Clock the frame counter and APU channels
@@ -239,37 +237,49 @@ impl Apu {
 }
 
 impl Memory for Apu {
-    fn read_byte(&self, addr: u16) -> std::io::Result<u8> {
+    fn read_byte(&self, addr: u16) -> Result<u8, crate::nes::utils::MemoryError> {
         match addr {
+            // Status register ($4015) - Read
             0x4015 => {
-                // APU Status Register
-                let mut result = 0u8;
+                let mut status = 0u8;
                 
-                // Set bits based on channel status
-                if self.pulse1.length_counter > 0 { result |= 0x01; }
-                if self.pulse2.length_counter > 0 { result |= 0x02; }
-                if self.triangle.length_counter > 0 { result |= 0x04; }
-                if self.noise.length_counter > 0 { result |= 0x08; }
-                if self.dmc.bytes_remaining > 0 { result |= 0x10; }
-                
-                // Set interrupt flags
-                if self.frame_irq.get() {
-                    result |= 0x40;
-                }
-                if self.dmc_irq {
-                    result |= 0x80;
+                // Pulse 1 length counter > 0
+                if self.pulse1.length_counter > 0 {
+                    status |= 0x01;
                 }
                 
-                // Reading the status register clears the frame interrupt flag
-                self.frame_irq.set(false);
+                // Pulse 2 length counter > 0
+                if self.pulse2.length_counter > 0 {
+                    status |= 0x02;
+                }
                 
-                Ok(result)
-            }
+                // Triangle length counter > 0
+                if self.triangle.length_counter > 0 {
+                    status |= 0x04;
+                }
+                
+                // Noise length counter > 0
+                if self.noise.length_counter > 0 {
+                    status |= 0x08;
+                }
+                
+                // DMC bytes remaining > 0
+                if self.dmc.bytes_remaining > 0 {
+                    status |= 0x10;
+                }
+                
+                // DMC IRQ flag
+                if self.dmc.irq_pending {
+                    status |= 0x80;
+                }
+                
+                Ok(status)
+            },
             _ => Ok(0),
         }
     }
     
-    fn write_byte(&mut self, addr: u16, value: u8) -> std::io::Result<()> {
+    fn write_byte(&mut self, addr: u16, value: u8) -> Result<(), crate::nes::utils::MemoryError> {
         self.write_register(addr, value);
         Ok(())
     }
@@ -297,11 +307,11 @@ mod tests {
     }
     
     impl Memory for TestMemory {
-        fn read_byte(&self, addr: u16) -> std::io::Result<u8> {
+        fn read_byte(&self, addr: u16) -> Result<u8, crate::nes::utils::MemoryError> {
             Ok(self.data[addr as usize])
         }
         
-        fn write_byte(&mut self, _addr: u16, _value: u8) -> std::io::Result<()> {
+        fn write_byte(&mut self, _addr: u16, _value: u8) -> Result<(), crate::nes::utils::MemoryError> {
             Ok(())
         }
     }

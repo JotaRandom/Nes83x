@@ -162,9 +162,9 @@ impl Noise {
         self.constant_volume = false;
         self.volume = 0;
         self.timer = 0;
-        self.timer_period = 0;
+        self.period_index = 0;  // This was timer_period in the original code
         self.shift_register = 1;  // Initial value is 1
-        self.mode = false;
+        self.mode_flag = false;   // This was mode in the original code
         self.halt_length_counter = false;
     }
     

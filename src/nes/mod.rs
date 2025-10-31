@@ -12,7 +12,7 @@ use self::cpu::Cpu;
 use self::ppu::Ppu;
 use self::apu::Apu;
 use self::mapper::Mapper;
-use self::input::{InputManager, Button};
+use self::input::{InputManager, Input, Button};
 
 // Re-export the Memory trait
 pub use crate::nes::utils::Memory;
@@ -21,6 +21,7 @@ use thiserror::Error;
 use std::path::Path;
 
 /// Represents the NES system
+#[derive(Debug)]
 pub struct Nes {
     /// The CPU (Central Processing Unit)
     pub cpu: Cpu,
@@ -188,30 +189,30 @@ impl Nes {
         let target_cycles = 29780;
         let mut cycles = 0;
         
+        // Create raw pointers to avoid multiple mutable borrows
+        let apu_ptr = &self.apu as *const Apu as *mut Apu;
+        let cpu_ptr = &self.cpu as *const super::cpu::Cpu as *mut super::cpu::Cpu;
+        
         while cycles < target_cycles {
-            // Store the current CPU cycles in a temporary variable
-            let cpu_cycles = {
-                // Use a block to limit the scope of the mutable borrow
-                let cpu = &mut self.cpu;
-                let mem = &mut *self;
-                cpu.step(mem)?
-            };
+            // Safe because we know these pointers are valid for the duration of this method
+            let cpu = unsafe { &mut *cpu_ptr };
             
+            // Step the CPU and handle any NMI that might be triggered
+            let cpu_cycles = cpu.step(self)?;
             cycles += cpu_cycles as u32;
             
             // Run the PPU for the same number of cycles * 3 (PPU runs at 3x the CPU speed)
             for _ in 0..(cpu_cycles * 3) {
                 let nmi = self.ppu.tick();
                 if nmi {
-                    self.cpu.nmi();
+                    cpu.nmi();
                 }
             }
             
             // Run the APU for the same number of cycles
+            let apu = unsafe { &mut *apu_ptr };
             for _ in 0..cpu_cycles {
-                // Create a mutable reference to APU for ticking
-                let apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
-                apu.tick();
+                apu.tick(self);
             }
             
             self.cycle_count += cpu_cycles as u64;
@@ -256,26 +257,26 @@ impl Memory for Nes {
             0x2000..=0x3FFF => {
                 let reg = (addr & 0x0007) as u16;
                 // Create a mutable reference to PPU for reading registers
-                let ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                let ppu: &mut ppu::Ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
                 Ok(ppu.read_register(reg))
             }
             
             // APU and I/O registers
             0x4000..=0x4015 | 0x4017 => {
                 // Create a mutable reference to APU for reading registers
-                let apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
+                let apu: &mut apu::Apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
                 apu.read_byte(addr)
             }
             
             // Controller 1
             0x4016 => {
-                let input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                let input: &mut input::Input = unsafe { &mut *((&self.input as *const _) as *mut _) };
                 Ok(input.read(0))
             }
             
             // Controller 2
             0x4017 => {
-                let input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                let input: &mut input::Input = unsafe { &mut *((&self.input as *const _) as *mut _) };
                 Ok(input.read(1))
             }
             
@@ -306,7 +307,7 @@ impl Memory for Nes {
             0x2000..=0x3FFF => {
                 let reg = (addr & 0x0007) as u16;
                 // Create a mutable reference to PPU for writing registers
-                let ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                let ppu: &mut ppu::Ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
                 ppu.write_register(reg, value);
                 Ok(())
             }
@@ -322,7 +323,7 @@ impl Memory for Nes {
             // Controller register 1
             0x4016 => {
                 // Create a mutable reference to input for writing
-                let input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                let input: &mut input::Input = unsafe { &mut *((&self.input as *const _) as *mut _) };
                 input.write(value);
                 Ok(())
             }
@@ -330,7 +331,7 @@ impl Memory for Nes {
             // APU and I/O registers
             0x4000..=0x4013 | 0x4015 | 0x4017 => {
                 // Create a mutable reference to APU for writing registers
-                let apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
+                let apu: &mut apu::Apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
                 apu.write_byte(addr, value)
             }
             
