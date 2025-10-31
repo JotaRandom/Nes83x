@@ -652,19 +652,10 @@ impl Cpu {
             0x5B => self.sre(AddressingMode::AbsoluteY, memory),                     // SRE Absolute,Y
             0x43 => self.sre(AddressingMode::IndirectX, memory),                     // SRE (Indirect,X)
             0x53 => self.sre(AddressingMode::IndirectY, memory),                     // SRE (Indirect),Y
-            0x9E => self.sha(AddressingMode::AbsoluteY, memory),                     // SHA (AXS) Absolute,Y
-            0x9F => self.sha(AddressingMode::AbsoluteY, memory),                     // SHA (AXS) Absolute,Y (alternate)
-            0x93 => self.sha(AddressingMode::IndirectY, memory),                     // SHA (AXS) (Indirect),Y
-            0x9C => self.shy(AddressingMode::AbsoluteX, memory),                     // SHY Absolute,X
-            0x9B => self.shx(AddressingMode::AbsoluteY, memory),                     // SHX Absolute,Y
-            0x9F => self.sxa(AddressingMode::AbsoluteY, memory),                     // SXA (SHX) Absolute,Y
-            0x9E => self.sya(AddressingMode::AbsoluteX, memory),                     // SYA (SHY) Absolute,X
-            0x8F => self.xas(AddressingMode::AbsoluteY, memory),                     // XAS (SHX) Absolute,Y
-            0x9E => self.xas(AddressingMode::AbsoluteX, memory),                     // XAS (SHY) Absolute,X
-            0x9C => self.xas(AddressingMode::AbsoluteX, memory),                     // XAS (SHX) Absolute,X (alternate)
-            0x9B => self.xas(AddressingMode::AbsoluteY, memory),                     // XAS (SHY) Absolute,Y (alternate)
-            0x9F => self.xas(AddressingMode::AbsoluteY, memory),                     // XAS (SHX) Absolute,Y (alternate)
+            0x9E => self.xas(AddressingMode::AbsoluteX, memory),                     // XAS (SHX) Absolute,X
+            0x9F => self.xas(AddressingMode::AbsoluteY, memory),                     // XAS (SHX) Absolute,Y
             0x93 => self.xas(AddressingMode::IndirectY, memory),                     // XAS (SHX) (Indirect),Y
+            0x9C => self.xas(AddressingMode::AbsoluteX, memory),                     // XAS (SHX) Absolute,X (alternate)
             
             // Handle unknown opcodes
             _ => {

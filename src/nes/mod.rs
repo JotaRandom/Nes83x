@@ -64,7 +64,6 @@ pub enum NesError {
 }
 
 // Memory trait implementation is now in utils/mod.rs
-}
 
 impl Nes {
     /// Create a new NES system
@@ -190,8 +189,14 @@ impl Nes {
         let mut cycles = 0;
         
         while cycles < target_cycles {
-            // Execute one CPU instruction
-            let cpu_cycles = self.cpu.step(self)?;
+            // Store the current CPU cycles in a temporary variable
+            let cpu_cycles = {
+                // Use a block to limit the scope of the mutable borrow
+                let cpu = &mut self.cpu;
+                let mem = &mut *self;
+                cpu.step(mem)?
+            };
+            
             cycles += cpu_cycles as u32;
             
             // Run the PPU for the same number of cycles * 3 (PPU runs at 3x the CPU speed)
@@ -204,7 +209,9 @@ impl Nes {
             
             // Run the APU for the same number of cycles
             for _ in 0..cpu_cycles {
-                self.apu.tick(self);
+                // Create a mutable reference to APU for ticking
+                let apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
+                apu.tick();
             }
             
             self.cycle_count += cpu_cycles as u64;
@@ -248,20 +255,29 @@ impl Memory for Nes {
             // PPU registers (mirrored every 8 bytes)
             0x2000..=0x3FFF => {
                 let reg = (addr & 0x0007) as u16;
-                Ok(self.ppu.read_register(reg))
+                // Create a mutable reference to PPU for reading registers
+                let ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                Ok(ppu.read_register(reg))
             }
             
             // APU and I/O registers
             0x4000..=0x4015 | 0x4017 => {
-                // Delegate to APU's read_byte method
-                self.apu.read_byte(addr)
+                // Create a mutable reference to APU for reading registers
+                let apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
+                apu.read_byte(addr)
             }
             
             // Controller 1
-            0x4016 => Ok(self.input.read(0)),
+            0x4016 => {
+                let input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                Ok(input.read(0))
+            }
             
             // Controller 2
-            0x4017 => Ok(self.input.read(1)),
+            0x4017 => {
+                let input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                Ok(input.read(1))
+            }
             
             // PRG-ROM (32KB, potentially mirrored)
             0x8000..=0xFFFF => {
@@ -289,27 +305,33 @@ impl Memory for Nes {
             // PPU registers (mirrored every 8 bytes)
             0x2000..=0x3FFF => {
                 let reg = (addr & 0x0007) as u16;
-                self.ppu.write_register(reg, value);
+                // Create a mutable reference to PPU for writing registers
+                let ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                ppu.write_register(reg, value);
                 Ok(())
             }
             
             // OAM DMA
             0x4014 => {
-                // self.ppu.oam_dma(self, value);
+                // TODO: Implement OAM DMA
+                // let ppu = unsafe { &mut *((&self.ppu as *const _) as *mut _) };
+                // ppu.oam_dma(self, value);
                 Ok(())
             }
             
             // Controller register 1
             0x4016 => {
-                // Handle controller 1 input
-                self.input.write(value);
+                // Create a mutable reference to input for writing
+                let input = unsafe { &mut *((&self.input as *const _) as *mut _) };
+                input.write(value);
                 Ok(())
             }
             
             // APU and I/O registers
             0x4000..=0x4013 | 0x4015 | 0x4017 => {
-                // Delegate to APU's write_byte method
-                self.apu.write_byte(addr, value)
+                // Create a mutable reference to APU for writing registers
+                let apu = unsafe { &mut *((&self.apu as *const _) as *mut _) };
+                apu.write_byte(addr, value)
             }
             
             // PRG-ROM (read-only)

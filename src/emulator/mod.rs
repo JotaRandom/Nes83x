@@ -188,7 +188,6 @@ impl Emulator {
                 app.quit();
             }
             gtk::Inhibit(false)
-            glib::Propagation::Stop
         });
 
         // Show the window
