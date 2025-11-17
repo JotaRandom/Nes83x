@@ -1,0 +1,2 @@
+# Clippy configuration following NES83x code style guide
+msrv = "1.70"

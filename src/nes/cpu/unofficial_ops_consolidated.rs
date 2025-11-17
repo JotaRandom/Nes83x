@@ -2,7 +2,7 @@ use super::{Cpu, CpuResult, CpuError, AddressingMode};
 use super::status_flags::StatusFlags;
 use crate::nes::utils::Memory;
 
-impl<M: Memory> Cpu<M> {
+impl Cpu {
     // =============================================
     // Flag Operations (from unofficial_ops.rs)
     // =============================================
@@ -50,23 +50,23 @@ impl<M: Memory> Cpu<M> {
     }
 
     /// BRK - Force Interrupt
-    pub(crate) fn brk(&mut self) -> CpuResult<u8> {
+    pub(crate) fn brk(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
         // Push PC + 2 to stack (PC points to next instruction after BRK)
         let pc_plus_2 = self.reg.pc.wrapping_add(1);
-        self.push_word(pc_plus_2)?;
+        self.push_word(pc_plus_2, memory)?;
         
         // Push status with B flag set
         let mut status = self.reg.p;
         status.insert(StatusFlags::BREAK);
-        self.push_byte(status.bits())?;
+        self.push_byte(status.bits(), memory)?;
         
         // Set interrupt disable flag
         self.reg.p.insert(StatusFlags::INTERRUPT_DISABLE);
         
         // Jump to interrupt vector
-        let lo = self.read_byte(0xFFFE)? as u16;
-        let hi = self.read_byte(0xFFFF)? as u16;
-        self.reg.pc = (hi << 8) | lo;
+        let lo = memory.read_byte(0xFFFE)?;
+        let hi = memory.read_byte(0xFFFF)?;
+        self.reg.pc = (hi as u16) << 8 | lo as u16;
         
         Ok(7) // BRK takes 7 cycles
     }
@@ -76,8 +76,8 @@ impl<M: Memory> Cpu<M> {
     // =============================================
     
     /// SHA (SHX, SXA, XAS) - Store A & X & (high byte of address + 1)
-    pub(crate) fn sha(&mut self, mode: AddressingMode) -> CpuResult<u8> {
-        let (addr, _page_crossed, _) = self.get_operand_address(mode)?;
+    pub(crate) fn sha(&mut self, memory: &mut impl Memory, mode: AddressingMode) -> CpuResult<u8> {
+        let (addr, _page_crossed, _) = self.get_operand_address(memory, mode)?;
         
         // Calculate the high byte of the address + 1
         let high_byte_plus_1 = ((addr >> 8) + 1) as u8;
@@ -86,7 +86,7 @@ impl<M: Memory> Cpu<M> {
         let value = self.reg.a & self.reg.x & high_byte_plus_1;
         
         // Write the value to memory
-        self.write_byte(addr, value)?;
+        memory.write_byte(addr, value)?;
         
         // Determine cycle count based on addressing mode and page crossing
         let cycles = match mode {
@@ -99,8 +99,8 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// SHY (SHY, SYA) - Store Y & (high byte of address + 1)
-    pub(crate) fn shy(&mut self, mode: AddressingMode) -> CpuResult<u8> {
-        let (addr, _page_crossed, _) = self.get_operand_address(mode)?;
+    pub(crate) fn shy(&mut self, memory: &mut impl Memory, mode: AddressingMode) -> CpuResult<u8> {
+        let (addr, _page_crossed, _) = self.get_operand_address(memory, mode)?;
         
         // Calculate the high byte of the address + 1
         let high_byte_plus_1 = ((addr >> 8) + 1) as u8;
@@ -109,7 +109,7 @@ impl<M: Memory> Cpu<M> {
         let value = self.reg.y & high_byte_plus_1;
         
         // Write the value to memory
-        self.write_byte(addr, value)?;
+        memory.write_byte(addr, value)?;
         
         // SHY only supports Absolute,X addressing
         match mode {
@@ -119,8 +119,8 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// SHX (SHX, SXA) - Store X & (high byte of address + 1)
-    pub(crate) fn shx(&mut self, mode: AddressingMode) -> CpuResult<u8> {
-        let (addr, _page_crossed, _) = self.get_operand_address(mode)?;
+    pub(crate) fn shx(&mut self, memory: &mut impl Memory, mode: AddressingMode) -> CpuResult<u8> {
+        let (addr, _page_crossed, _) = self.get_operand_address(memory, mode)?;
         
         // Calculate the high byte of the address + 1
         let high_byte_plus_1 = ((addr >> 8) + 1) as u8;
@@ -129,7 +129,7 @@ impl<M: Memory> Cpu<M> {
         let value = self.reg.x & high_byte_plus_1;
         
         // Write the value to memory
-        self.write_byte(addr, value)?;
+        memory.write_byte(addr, value)?;
         
         // SHX only supports Absolute,Y addressing
         match mode {
@@ -139,13 +139,13 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// SXA (SHX) - Alias for SHX
-    pub(crate) fn sxa(&mut self, mode: AddressingMode) -> CpuResult<u8> {
-        self.shx(mode)
+    pub(crate) fn sxa(&mut self, memory: &mut impl Memory, mode: AddressingMode) -> CpuResult<u8> {
+        self.shx(memory, mode)
     }
     
     /// SYA (SHY) - Alias for SHY
-    pub(crate) fn sya(&mut self, mode: AddressingMode) -> CpuResult<u8> {
-        self.shy(mode)
+    pub(crate) fn sya(&mut self, memory: &mut impl Memory, mode: AddressingMode) -> CpuResult<u8> {
+        self.shy(memory, mode)
     }
     
     // =============================================
@@ -154,9 +154,9 @@ impl<M: Memory> Cpu<M> {
     
     /// AXS (SBX) - AND X register with accumulator and store in X
     /// Then subtract operand from X without borrow (CMP & DEX at once)
-    pub(crate) fn axs(&mut self, mode: AddressingMode) -> CpuResult<u8> {
-        let (addr, _page_crossed, _) = self.get_operand_address(mode)?;
-        let value = self.read_byte(addr)?;
+    pub(crate) fn axs(&mut self, memory: &mut impl Memory, mode: AddressingMode) -> CpuResult<u8> {
+        let (addr, _page_crossed, _) = self.get_operand_address(memory, mode)?;
+        let value = memory.read_byte(addr)?;
         
         // AND X with A and store in X
         let x = self.reg.x & self.reg.a;
@@ -182,14 +182,14 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// DOP (Double NOP) - No operation (2-byte NOP)
-    pub(crate) fn dop(&mut self, _mode: AddressingMode) -> CpuResult<u8> {
+    pub(crate) fn dop(&mut self, memory: &mut impl Memory, _mode: AddressingMode) -> CpuResult<u8> {
         // Just skip the immediate byte
         self.reg.pc = self.reg.pc.wrapping_add(1);
         Ok(2)
     }
     
     /// STP (STOP) - Stop the processor (HALT)
-    pub(crate) fn stp(&mut self, _mode: AddressingMode) -> CpuResult<u8> {
+    pub(crate) fn stp(&mut self, memory: &mut impl Memory, _mode: AddressingMode) -> CpuResult<u8> {
         // In a real 6502, this would halt the CPU until a reset
         // For emulation purposes, we'll just stop execution
         self.is_running = false;
@@ -197,9 +197,9 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// LAS (LAR) - AND memory with stack pointer, transfer to A, X, and S
-    pub(crate) fn las(&mut self, mode: AddressingMode) -> CpuResult<u8> {
-        let (addr, _page_crossed, _) = self.get_operand_address(mode)?;
-        let value = self.read_byte(addr)?;
+    pub(crate) fn las(&mut self, memory: &mut impl Memory, mode: AddressingMode) -> CpuResult<u8> {
+        let (addr, _page_crossed, _) = self.get_operand_address(memory, mode)?;
+        let value = memory.read_byte(addr)?;
         
         // AND memory with stack pointer
         let result = value & self.reg.s;
@@ -372,8 +372,8 @@ impl<M: Memory> Cpu<M> {
     // =============================================
     
     /// AAC (ANC) - AND byte with accumulator, then move bit 7 to Carry
-    pub(crate) fn aac(&mut self) -> CpuResult<u8> {
-        let value = self.read_byte(self.reg.pc)?;
+    pub(crate) fn aac(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
+        let value = memory.read_byte(self.reg.pc)?;
         self.reg.pc = self.reg.pc.wrapping_add(1);
         
         self.reg.a &= value;
@@ -386,8 +386,8 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// ANE (XAA) - Exact operation varies by hardware, this is a common implementation
-    pub(crate) fn ane(&mut self) -> CpuResult<u8> {
-        let value = self.read_byte(self.reg.pc)?;
+    pub(crate) fn ane(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
+        let value = memory.read_byte(self.reg.pc)?;
         self.reg.pc = self.reg.pc.wrapping_add(1);
         
         // This is a simplified implementation; actual behavior varies
@@ -398,8 +398,8 @@ impl<M: Memory> Cpu<M> {
     }
     
     /// ARR - AND byte with accumulator, then rotate right and check bits 5 and 6
-    pub(crate) fn arr(&mut self) -> CpuResult<u8> {
-        let value = self.read_byte(self.reg.pc)?;
+    pub(crate) fn arr(&mut self, memory: &mut impl Memory) -> CpuResult<u8> {
+        let value = memory.read_byte(self.reg.pc)?;
         self.reg.pc = self.reg.pc.wrapping_add(1);
         
         // AND with accumulator

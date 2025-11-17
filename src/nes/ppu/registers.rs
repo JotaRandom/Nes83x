@@ -1,4 +1,4 @@
-use bitflags::bitflags;
+use std::cell::Cell;
 
 bitflags! {
     /// PPU Control Register ($2000)
@@ -51,14 +51,14 @@ bitflags! {
 }
 
 /// Represents the PPU registers
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Registers {
     /// PPU Control Register ($2000)
     pub ctrl: ControlRegister,
     /// PPU Mask Register ($2001)
     pub mask: MaskRegister,
     /// PPU Status Register ($2002)
-    pub status: StatusRegister,
+    pub status: Cell<StatusRegister>,
     /// OAM Address Register ($2003)
     pub oam_addr: u8,
     /// OAM Data Register ($2004)
@@ -85,7 +85,7 @@ impl Registers {
         Registers {
             ctrl: ControlRegister::empty(),
             mask: MaskRegister::empty(),
-            status: StatusRegister::empty(),
+            status: Cell::new(StatusRegister::empty()),
             oam_addr: 0,
             oam_data: 0,
             scroll: 0,
@@ -100,7 +100,18 @@ impl Registers {
 
     /// Reset all registers to their initial state
     pub fn reset(&mut self) {
-        *self = Self::new();
+        self.ctrl = ControlRegister::empty();
+        self.mask = MaskRegister::empty();
+        self.status.set(StatusRegister::empty());
+        self.oam_addr = 0;
+        self.oam_data = 0;
+        self.scroll = 0;
+        self.addr = 0;
+        self.data = 0;
+        self.oam_dma = 0;
+        self.temp_addr = 0;
+        self.fine_x = 0;
+        self.write_toggle = false;
     }
 
     /// Get the base nametable address (0x2000, 0x2400, 0x2800, or 0x2C00)
@@ -140,12 +151,22 @@ impl Registers {
         if self.ctrl.contains(ControlRegister::SPRITE_SIZE) {
             (8, 16) // 8x16 sprites
         } else {
-            (8, 8)  // 8x8 sprites
+            (8, 8) // 8x8 sprites
         }
     }
 
     /// Check if NMI is enabled on VBlank
     pub fn nmi_enabled(&self) -> bool {
         self.ctrl.contains(ControlRegister::GENERATE_NMI)
+    }
+
+    /// Get the status register
+    pub fn status(&self) -> StatusRegister {
+        self.status.get()
+    }
+
+    /// Set the status register
+    pub fn set_status(&self, status: StatusRegister) {
+        self.status.set(status);
     }
 }

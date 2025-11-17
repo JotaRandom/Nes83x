@@ -4,15 +4,15 @@
 //! memory mapping and bank switching for different cartridge types.
 
 // Re-export mappers
-pub mod mmc3;
 pub mod mmc2;
+pub mod mmc3;
 
 // Import mappers
 use mmc3::MMC3;
-use mmc2::MMC2;
-use crate::nes::cartridge;
 
+use std::cell::RefCell;
 use std::fmt;
+use std::rc::Rc;
 
 /// Trait for NES mappers
 pub trait Mapper: fmt::Debug + Send + Sync {
@@ -73,50 +73,19 @@ pub fn create_mapper(
     prg_rom: Vec<u8>,
     chr_rom: Option<Vec<u8>>,
     mirroring: Mirroring,
-) -> Result<Box<dyn Mapper>, String> {
+) -> Result<Rc<RefCell<dyn Mapper>>, crate::nes::NesError> {
     match mapper_num {
         // NROM (Mapper 0)
-        0 => Ok(Box::new(Nrom::new(prg_rom, chr_rom, mirroring))),
+        0 => Ok(Rc::new(RefCell::new(Nrom::new(prg_rom, chr_rom, mirroring)))),
 
         // MMC1 (Mapper 1)
-        1 => Ok(Box::new(Mmc1::new(prg_rom, chr_rom, mirroring))),
+        1 => Ok(Rc::new(RefCell::new(Mmc1::new(prg_rom, chr_rom, mirroring)))),
 
         // MMC3 (Mapper 4)
-        4 => {
-            // Create a cartridge-like structure for MMC3
-            let cartridge = cartridge::Cartridge {
-                prg_rom,
-                chr_rom: chr_rom.unwrap_or_default(),
-                mapper: 4,
-                mirroring,
-                has_battery: false,
-                has_trainer: false,
-                has_prg_ram: false,
-                is_vs_unisystem: false,
-                is_playchoice: false,
-            };
-            Ok(Box::new(MMC3::new(&cartridge)))
-        },
-
-        // MMC2 (Mapper 9)
-        9 => {
-            // Create a cartridge-like structure for MMC2
-            let cartridge = cartridge::Cartridge {
-                prg_rom,
-                chr_rom: chr_rom.unwrap_or_default(),
-                mapper: 9,
-                mirroring,
-                has_battery: false,
-                has_trainer: false,
-                has_prg_ram: false,
-                is_vs_unisystem: false,
-                is_playchoice: false,
-            };
-            Ok(Box::new(MMC2::new(&cartridge)))
-        },
+        4 => Ok(Rc::new(RefCell::new(MMC3::new(prg_rom, chr_rom, mirroring)))),
 
         // Unsupported mapper
-        n => Err(format!("Unsupported mapper: {}", n)),
+        n => Err(crate::nes::NesError::UnsupportedMapper(n)),
     }
 }
 
@@ -146,6 +115,15 @@ impl Nrom {
 impl Mapper for Nrom {
     fn read(&self, addr: u16) -> u8 {
         match addr {
+            // CHR ROM/RAM (0x0000-0x1FFF)
+            0x0000..=0x1FFF => {
+                if let Some(chr) = &self.chr_rom {
+                    chr[addr as usize]
+                } else {
+                    0 // CHR RAM not implemented
+                }
+            }
+
             // PRG ROM (0x8000-0xFFFF)
             0x8000..=0xFFFF => {
                 let addr = (addr - 0x8000) as usize % self.prg_rom.len();
@@ -156,8 +134,12 @@ impl Mapper for Nrom {
         }
     }
 
-    fn write(&mut self, _addr: u16, _value: u8) {
-        // NROM has no bank switching, so writes to ROM are ignored
+    fn write(&mut self, addr: u16, value: u8) {
+        // CHR RAM writes
+        if addr < 0x2000 && self.chr_rom.is_none() {
+            // If CHR RAM, write to it, but not implemented
+            let _ = (addr, value); // Suppress unused variable warnings
+        }
     }
 
     fn prg_rom(&self) -> &[u8] {
@@ -243,10 +225,29 @@ impl Mmc1 {
 impl Mapper for Mmc1 {
     fn read(&self, addr: u16) -> u8 {
         match addr {
-            // PRG RAM (0x6000-0x7FFF)
-            0x6000..=0x7FFF => {
-                self.prg_ram[(addr - 0x6000) as usize]
+            // CHR ROM (0x0000-0x1FFF)
+            0x0000..=0x1FFF => {
+                if let Some(chr) = &self.chr_rom {
+                    let bank_size = if self.chr_bank_mode() { 0x1000 } else { 0x2000 };
+                    let bank = if addr < 0x1000 {
+                        self.chr_bank0 as usize
+                    } else {
+                        self.chr_bank1 as usize
+                    };
+                    let addr_offset = (addr as usize) % bank_size;
+                    let chr_addr = bank * bank_size + addr_offset;
+                    if chr_addr < chr.len() {
+                        chr[chr_addr]
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
             }
+
+            // PRG RAM (0x6000-0x7FFF)
+            0x6000..=0x7FFF => self.prg_ram[(addr - 0x6000) as usize],
 
             // PRG ROM (0x8000-0xFFFF)
             0x8000..=0xFFFF => {

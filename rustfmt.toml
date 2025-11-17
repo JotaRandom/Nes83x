@@ -1,0 +1,11 @@
+# Rustfmt configuration following NES83x code style guide
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
+remove_nested_parens = true
+merge_derives = true
+use_try_shorthand = true
+use_field_init_shorthand = true

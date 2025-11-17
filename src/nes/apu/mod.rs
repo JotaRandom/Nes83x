@@ -5,34 +5,34 @@ use std::cell::Cell;
 // Constants
 /// Length counter lookup table (0-31)
 pub const LENGTH_TABLE: [u8; 32] = [
-    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
-    12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,
+    192, 24, 72, 26, 16, 28, 32, 30,
 ];
 
 /// Noise period lookup table
 pub const NOISE_PERIOD_TABLE: [u16; 16] = [
-    4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
+    4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068,
 ];
 
 /// DMC rate table (NTSC)
 pub const DMC_RATE_TABLE: [u16; 16] = [
-    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
 ];
 
-mod pulse;
-mod triangle;
-mod noise;
 mod dmc;
 mod frame_counter;
+mod noise;
+mod pulse;
+mod triangle;
 
 use crate::nes::Memory;
 
 // Re-export the main APU types
-pub use self::pulse::Pulse;
-pub use self::triangle::Triangle;
-pub use self::noise::Noise;
 pub use self::dmc::Dmc;
 pub use self::frame_counter::FrameCounter;
+pub use self::noise::Noise;
+pub use self::pulse::Pulse;
+pub use self::triangle::Triangle;
 
 /// The NES APU (Audio Processing Unit)
 #[derive(Debug)]
@@ -40,19 +40,19 @@ pub struct Apu {
     // Pulse channels (square waves)
     pulse1: Pulse,
     pulse2: Pulse,
-    
+
     // Triangle channel
     triangle: Triangle,
-    
+
     // Noise channel
     noise: Noise,
-    
+
     // DMC channel (Delta Modulation Channel)
     dmc: Dmc,
-    
+
     // Frame counter
     frame_counter: FrameCounter,
-    
+
     // Internal state
     cycle: u64,
     frame_irq: Cell<bool>,
@@ -74,13 +74,13 @@ impl Apu {
             dmc_irq: false,
         }
     }
-    
+
     /// Reset the APU to its initial state
     pub fn reset(&mut self) {
         self.cycle = 0;
         self.frame_irq.set(false);
         self.dmc_irq = false;
-        
+
         self.pulse1.reset();
         self.pulse2.reset();
         self.triangle.reset();
@@ -88,39 +88,39 @@ impl Apu {
         self.dmc.reset();
         self.frame_counter.reset();
     }
-    
+
     /// Execute one APU cycle (1 CPU cycle = 2 APU cycles)
     pub fn tick(&mut self, memory: &mut dyn Memory) -> Result<u8, crate::nes::utils::MemoryError> {
         // Clock the frame counter and audio channels every other CPU cycle (APU runs at CPU rate / 2)
         if self.cycle % 2 == 0 {
             self.clock_frame_counter();
         }
-        
+
         // Clock the DMC channel (runs at CPU rate)
         if self.dmc.enabled {
             self.dmc.clock(memory)?;
         }
-        
+
         // Generate and return the current audio sample
         let sample = self.generate_sample();
-        
+
         // Update cycle counter
         self.cycle = self.cycle.wrapping_add(1);
-        
+
         Ok(sample)
     }
-    
+
     /// Clock the frame counter and APU channels
     fn clock_frame_counter(&mut self) {
         // Clock the frame counter and get frame timing events
         let (quarter_frame, half_frame) = self.frame_counter.clock();
-        
+
         // Clock each audio channel
         self.pulse1.clock();
         self.pulse2.clock();
         self.triangle.clock();
         self.noise.clock();
-        
+
         // Handle frame counter events
         if quarter_frame {
             self.quarter_frame();
@@ -129,13 +129,13 @@ impl Apu {
             self.half_frame();
         }
     }
-    
+
     /// Step the frame counter (kept for backward compatibility)
     fn step_frame_counter(&mut self) {
         // This method is kept for backward compatibility but is no longer used
         // The frame counter is now handled in clock_frame_counter()
     }
-    
+
     /// Quarter frame clock (envelopes, triangle's linear counter)
     fn quarter_frame(&mut self) {
         self.pulse1.clock_envelope();
@@ -143,7 +143,7 @@ impl Apu {
         self.noise.clock_envelope();
         self.triangle.clock_linear_counter();
     }
-    
+
     /// Half frame clock (length counters, sweep)
     fn half_frame(&mut self) {
         self.pulse1.clock_sweep();
@@ -153,7 +153,7 @@ impl Apu {
         self.triangle.clock_length_counter();
         self.noise.clock_length_counter();
     }
-    
+
     /// Generate audio samples
     pub fn generate_sample(&self) -> u8 {
         // Mix all channels
@@ -162,17 +162,15 @@ impl Apu {
         let triangle = self.triangle.output();
         let noise = self.noise.output();
         let dmc = self.dmc.output(); // Use the output method
-        
+
         // Simple mixing (can be improved with proper NES audio mixing)
         let pulse_out = 0.00752 * (pulse1 + pulse2) as f32;
-        let tnd_out = 0.00851 * triangle as f32 + 
-                     0.00494 * noise as f32 + 
-                     0.00335 * dmc as f32;
-        
+        let tnd_out = 0.00851 * triangle as f32 + 0.00494 * noise as f32 + 0.00335 * dmc as f32;
+
         let sample = (pulse_out + tnd_out).clamp(0.0, 1.0);
         (sample * 255.0) as u8
     }
-    
+
     /// Write to an APU register
     pub fn write_register(&mut self, addr: u16, value: u8) {
         match addr {
@@ -181,37 +179,37 @@ impl Apu {
             0x4001 => self.pulse1.write_sweep(value),
             0x4002 => self.pulse1.write_timer_low(value),
             0x4003 => self.pulse1.write_timer_high(value),
-            
+
             // Pulse 2
             0x4004 => self.pulse2.write_control(value),
             0x4005 => self.pulse2.write_sweep(value),
             0x4006 => self.pulse2.write_timer_low(value),
             0x4007 => self.pulse2.write_timer_high(value),
-            
+
             // Triangle
             0x4008 => self.triangle.write_control(value),
             0x400A => self.triangle.write_timer_low(value),
             0x400B => self.triangle.write_timer_high(value),
-            
+
             // Noise
             0x400C => self.noise.write_control(value),
             0x400E => self.noise.write_period(value),
             0x400F => self.noise.write_length_counter(value),
-            
+
             // DMC
             0x4010 => self.dmc.write_control(value),
             0x4011 => self.dmc.write_value(value),
             0x4012 => self.dmc.write_address(value),
             0x4013 => self.dmc.write_length(value),
-            
+
             // Status/Frame Counter
             0x4015 => self.write_status(value),
             0x4017 => frame_counter::FrameCounter::write(&mut self.frame_counter, value),
-            
+
             _ => {}
         }
     }
-    
+
     /// Write to status register ($4015)
     fn write_status(&mut self, value: u8) {
         self.pulse1.enabled = (value & 0x01) != 0;
@@ -219,7 +217,7 @@ impl Apu {
         self.triangle.enabled = (value & 0x04) != 0;
         self.noise.enabled = (value & 0x08) != 0;
         self.dmc.enabled = (value & 0x10) != 0;
-        
+
         // If a channel is disabled, its length counter is forced to 0
         if !self.pulse1.enabled {
             self.pulse1.length_counter = 0;
@@ -242,43 +240,43 @@ impl Memory for Apu {
             // Status register ($4015) - Read
             0x4015 => {
                 let mut status = 0u8;
-                
+
                 // Pulse 1 length counter > 0
                 if self.pulse1.length_counter > 0 {
                     status |= 0x01;
                 }
-                
+
                 // Pulse 2 length counter > 0
                 if self.pulse2.length_counter > 0 {
                     status |= 0x02;
                 }
-                
+
                 // Triangle length counter > 0
                 if self.triangle.length_counter > 0 {
                     status |= 0x04;
                 }
-                
+
                 // Noise length counter > 0
                 if self.noise.length_counter > 0 {
                     status |= 0x08;
                 }
-                
+
                 // DMC bytes remaining > 0
                 if self.dmc.bytes_remaining > 0 {
                     status |= 0x10;
                 }
-                
+
                 // DMC IRQ flag
                 if self.dmc.is_irq_pending() {
                     status |= 0x80;
                 }
-                
+
                 Ok(status)
-            },
+            }
             _ => Ok(0),
         }
     }
-    
+
     fn write_byte(&mut self, addr: u16, value: u8) -> Result<(), crate::nes::utils::MemoryError> {
         self.write_register(addr, value);
         Ok(())
@@ -289,33 +287,35 @@ impl Memory for Apu {
 mod tests {
     use super::*;
     use crate::nes::Memory;
-    
+
     struct TestMemory {
         data: [u8; 0x10000],
     }
-    
+
     impl TestMemory {
         fn new() -> Self {
-            TestMemory {
-                data: [0; 0x10000],
-            }
+            TestMemory { data: [0; 0x10000] }
         }
-        
+
         fn write(&self, addr: u16, value: u8) {
             self.data[addr as usize] = value;
         }
     }
-    
+
     impl Memory for TestMemory {
         fn read_byte(&self, addr: u16) -> Result<u8, crate::nes::utils::MemoryError> {
             Ok(self.data[addr as usize])
         }
-        
-        fn write_byte(&mut self, _addr: u16, _value: u8) -> Result<(), crate::nes::utils::MemoryError> {
+
+        fn write_byte(
+            &mut self,
+            _addr: u16,
+            _value: u8,
+        ) -> Result<(), crate::nes::utils::MemoryError> {
             Ok(())
         }
     }
-    
+
     #[test]
     fn test_apu_reset() {
         let apu = Apu::new();
@@ -323,15 +323,15 @@ mod tests {
         assert!(!apu.frame_irq.get());
         assert!(!apu.dmc_irq);
     }
-    
+
     #[test]
     fn test_apu_register_write() {
         let mut apu = Apu::new();
-        
+
         // Test pulse 1 control register
         apu.write_register(0x4000, 0x3F); // Max volume, constant volume
         assert_eq!(apu.pulse1.envelope_volume, 15);
-        
+
         // Test frame counter
         apu.write_register(0x4017, 0x40); // Set frame counter mode 0, IRQ inhibit
         assert_eq!(apu.frame_counter.mode, 0);

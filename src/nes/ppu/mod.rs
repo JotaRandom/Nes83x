@@ -2,11 +2,13 @@
 //!
 //! This module implements the Ricoh RP2C02 PPU used in the NES.
 
-mod registers;
 mod memory;
+mod registers;
 
-pub use registers::*;
 pub use memory::*;
+pub use registers::*;
+
+use std::cell::Cell;
 
 /// The NES PPU (Picture Processing Unit)
 #[derive(Debug)]
@@ -23,13 +25,13 @@ pub struct Ppu {
     frame: u64,
 
     // Rendering state
-    vram_addr: u16,     // Current VRAM address (15 bits)
-    temp_vram_addr: u16, // Temporary VRAM address
-    fine_x: u8,         // Fine X scroll (3 bits)
-    write_toggle: bool,  // Toggle for PPUADDR/PPUSCROLL writes
+    vram_addr: Cell<u16>,      // Current VRAM address (15 bits)
+    temp_vram_addr: Cell<u16>, // Temporary VRAM address
+    fine_x: Cell<u8>,          // Fine X scroll (3 bits)
+    write_toggle: Cell<bool>,  // Toggle for PPUADDR/PPUSCROLL writes
 
     // OAM (Object Attribute Memory)
-    oam_addr: u8,
+    oam_addr: Cell<u8>,
     oam_data: [u8; 256], // 64 sprites * 4 bytes each
 
     // Secondary OAM (used during sprite evaluation)
@@ -51,6 +53,9 @@ pub struct Ppu {
     nmi_occurred: bool,
     nmi_previous: bool,
     nmi_delay: u8,
+
+    // Framebuffer for rendering (256x240 ARGB pixels)
+    pub framebuffer: Vec<u8>,
 }
 
 impl Default for Ppu {
@@ -62,17 +67,27 @@ impl Default for Ppu {
 impl Ppu {
     /// Create a new PPU instance
     pub fn new() -> Self {
+        let mut framebuffer = vec![0; 256 * 240 * 4];
+
+        // Initialize with a test pattern (solid red)
+        for pixel in framebuffer.chunks_mut(4) {
+            pixel[0] = 0xFF; // B
+            pixel[1] = 0x00; // G
+            pixel[2] = 0xFF; // R
+            pixel[3] = 0xFF; // A
+        }
+
         Ppu {
             regs: Registers::new(),
             memory: PpuMemory::new(),
             scanline: 0,
             cycle: 0,
             frame: 0,
-            vram_addr: 0,
-            temp_vram_addr: 0,
-            fine_x: 0,
-            write_toggle: false,
-            oam_addr: 0,
+            vram_addr: Cell::new(0),
+            temp_vram_addr: Cell::new(0),
+            fine_x: Cell::new(0),
+            write_toggle: Cell::new(false),
+            oam_addr: Cell::new(0),
             oam_data: [0; 256],
             secondary_oam: [0; 32],
             pattern_shift_lo: 0,
@@ -86,6 +101,7 @@ impl Ppu {
             nmi_occurred: false,
             nmi_previous: false,
             nmi_delay: 0,
+            framebuffer,
         }
     }
 
@@ -101,6 +117,7 @@ impl Ppu {
         self.fine_x = 0;
         self.write_toggle = false;
         self.oam_addr = 0;
+        // self.framebuffer = vec![0; 256 * 240 * 4]; // Keep the test pattern
         self.oam_data = [0; 256];
         self.secondary_oam = [0; 32];
         self.pattern_shift_lo = 0;
@@ -167,8 +184,51 @@ impl Ppu {
 
     /// Handle scanline rendering
     fn tick_scanline(&mut self) {
-        // TODO: Implement scanline rendering
-        // This will handle background rendering, sprite evaluation, and pixel composition
+        // Basic tile-based rendering
+        if self.scanline < 240 && self.cycle < 256 {
+            let x = self.cycle as usize;
+            let y = self.scanline as usize;
+
+            // Calculate which tile this pixel belongs to
+            let tile_x = x / 8;
+            let tile_y = y / 8;
+            let pixel_x = x % 8;
+            let pixel_y = y % 8;
+
+            // Get tile index from nametable (simplified - using nametable 0)
+            let nametable_addr = 0x2000;
+            let tile_index_addr = nametable_addr + (tile_y * 32 + tile_x) as u16;
+            let tile_index = self.memory.read(tile_index_addr);
+
+            // Get pattern data from CHR ROM
+            let pattern_table = 0x0000; // Use pattern table 0
+            let tile_addr = pattern_table + (tile_index as u16 * 16) + pixel_y as u16;
+
+            // Read the two bit planes for this pixel row
+            let plane0 = self.memory.read(tile_addr);
+            let plane1 = self.memory.read(tile_addr + 8);
+
+            // Extract the pixel color (2 bits per pixel)
+            let bit0 = (plane0 >> (7 - pixel_x)) & 1;
+            let bit1 = (plane1 >> (7 - pixel_x)) & 1;
+            let color_index = (bit1 << 1) | bit0;
+
+            // Get palette color (simplified - using background palette)
+            let palette_addr = 0x3F00 + color_index as u16;
+            let color_value = if color_index == 0 { 0x0F } else { 0x30 }; // Forzar colores para debug
+
+            // Convert NES color to RGB (simplified palette)
+            let (r, g, b) = nes_color_to_rgb(color_value);
+
+            // Write to framebuffer
+            let pixel_index = (y * 256 + x) * 4;
+            if pixel_index + 3 < self.framebuffer.len() {
+                self.framebuffer[pixel_index] = b;
+                self.framebuffer[pixel_index + 1] = g;
+                self.framebuffer[pixel_index + 2] = r;
+                self.framebuffer[pixel_index + 3] = 255;
+            }
+        }
     }
 
     /// Read a byte from a PPU register
@@ -227,8 +287,8 @@ impl Ppu {
                 }
 
                 // Copy bits 0-1 of the control register to the temporary VRAM address
-                self.temp_vram_addr = (self.temp_vram_addr & 0xF3FF) |
-                                    ((value as u16 & 0x03) << 10);
+                self.temp_vram_addr =
+                    (self.temp_vram_addr & 0xF3FF) | ((value as u16 & 0x03) << 10);
                 Ok(())
             }
 
@@ -266,11 +326,11 @@ impl Ppu {
                     // Second write: Y scroll
                     let fine_y = value & 0x07;
                     let y_scroll = (value >> 3) as u16;
-                    self.temp_vram_addr = (self.temp_vram_addr & 0x0C1F) |
-                                         ((fine_y as u16) << 12) |
-                                         ((y_scroll & 0x07) << 12) |
-                                         ((y_scroll & 0x18) << 2) |
-                                         ((y_scroll & 0xE0) << 2);
+                    self.temp_vram_addr = (self.temp_vram_addr & 0x0C1F)
+                        | ((fine_y as u16) << 12)
+                        | ((y_scroll & 0x07) << 12)
+                        | ((y_scroll & 0x18) << 2)
+                        | ((y_scroll & 0xE0) << 2);
                 }
                 self.write_toggle = !self.write_toggle;
                 Ok(())
@@ -280,12 +340,11 @@ impl Ppu {
             0x6 => {
                 if !self.write_toggle {
                     // First write: high byte of address
-                    self.temp_vram_addr = (self.temp_vram_addr & 0x00FF) |
-                                         (((value & 0x3F) as u16) << 8);
+                    self.temp_vram_addr =
+                        (self.temp_vram_addr & 0x00FF) | (((value & 0x3F) as u16) << 8);
                 } else {
                     // Second write: low byte of address
-                    self.temp_vram_addr = (self.temp_vram_addr & 0xFF00) |
-                                         (value as u16);
+                    self.temp_vram_addr = (self.temp_vram_addr & 0xFF00) | (value as u16);
                     self.vram_addr = self.temp_vram_addr;
                 }
                 self.write_toggle = !self.write_toggle;
@@ -301,7 +360,11 @@ impl Ppu {
 
             _ => {
                 // Log unimplemented register writes for debugging
-                log::warn!("Unimplemented PPU register write: 0x{:04X} = 0x{:02X}", addr, value);
+                log::warn!(
+                    "Unimplemented PPU register write: 0x{:04X} = 0x{:02X}",
+                    addr,
+                    value
+                );
                 Ok(())
             }
         }
@@ -341,6 +404,35 @@ impl Ppu {
     /// Get the current frame number
     pub fn frame(&self) -> u64 {
         self.frame
+    }
+}
+
+/// Convert NES color index to RGB values
+fn nes_color_to_rgb(color_index: u8) -> (u8, u8, u8) {
+    // NES color palette (simplified - these are the standard NES colors)
+    const NES_PALETTE: [(u8, u8, u8); 64] = [
+        (0x80, 0x80, 0x80), (0x00, 0x3D, 0xA6), (0x00, 0x12, 0xB0), (0x44, 0x00, 0x96),
+        (0xA1, 0x00, 0x5E), (0xC7, 0x00, 0x28), (0xBA, 0x06, 0x00), (0x8C, 0x17, 0x00),
+        (0x5C, 0x2F, 0x00), (0x10, 0x45, 0x00), (0x05, 0x4A, 0x00), (0x00, 0x47, 0x2E),
+        (0x00, 0x41, 0x66), (0x00, 0x00, 0x00), (0x05, 0x05, 0x05), (0x05, 0x05, 0x05),
+        (0xC7, 0xC7, 0xC7), (0x00, 0x77, 0xFF), (0x21, 0x55, 0xFF), (0x82, 0x37, 0xFA),
+        (0xEB, 0x2F, 0xB5), (0xFF, 0x29, 0x50), (0xFF, 0x22, 0x00), (0xD6, 0x32, 0x00),
+        (0xC4, 0x62, 0x00), (0x35, 0x80, 0x00), (0x05, 0x8F, 0x00), (0x00, 0x8A, 0x55),
+        (0x00, 0x99, 0xCC), (0x21, 0x21, 0x21), (0x09, 0x09, 0x09), (0x09, 0x09, 0x09),
+        (0xFF, 0xFF, 0xFF), (0x0F, 0xD7, 0xFF), (0x69, 0xA2, 0xFF), (0xD4, 0x80, 0xFF),
+        (0xFF, 0x45, 0xF3), (0xFF, 0x61, 0x8B), (0xFF, 0x88, 0x33), (0xFF, 0x9C, 0x12),
+        (0xFA, 0xBC, 0x20), (0x9F, 0xE3, 0x0E), (0x2B, 0xF0, 0x35), (0x0C, 0xF0, 0xA4),
+        (0x05, 0xFB, 0xFF), (0x5E, 0x5E, 0x5E), (0x0D, 0x0D, 0x0D), (0x0D, 0x0D, 0x0D),
+        (0xFF, 0xFF, 0xFF), (0xA6, 0xFC, 0xFF), (0xB3, 0xEC, 0xFF), (0xDA, 0xAB, 0xEB),
+        (0xFF, 0xA8, 0xF9), (0xFF, 0xAB, 0xB3), (0xFF, 0xD2, 0xB0), (0xFF, 0xEF, 0xA6),
+        (0xFF, 0xF7, 0x9C), (0xD7, 0xE8, 0x95), (0xA6, 0xED, 0xAF), (0xA2, 0xF2, 0xDA),
+        (0x99, 0xFF, 0xFC), (0xDD, 0xDD, 0xDD), (0x11, 0x11, 0x11), (0x11, 0x11, 0x11),
+    ];
+
+    if (color_index as usize) < NES_PALETTE.len() {
+        NES_PALETTE[color_index as usize]
+    } else {
+        (0, 0, 0) // Black for invalid colors
     }
 }
 

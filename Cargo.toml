@@ -1,25 +1,38 @@
 [package]
 name = "nes83x-rs"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "A NES emulator written in Rust"
 authors = ["Your Name <your.email@example.com>"]
 license = "MIT"
 repository = "https://github.com/yourusername/nes83x-rs"
 
+[lib]
+name = "nes83x"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nes83x-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "nes83x-gtk"
+path = "src/bin/nes-gtk.rs"
+required-features = ["gtk"]
+
+[[bin]]
+name = "nes83x-minifb"
+path = "src/bin/nes-minifb.rs"
+required-features = ["minifb"]
+
 [features]
-# Enable unofficial/illegal 6502 opcodes used in some NES games
-default = ["unofficial_ops"]
+default = ["minifb"]
+gtk = ["dep:gtk", "dep:glib", "dep:cairo-rs", "dep:gdk-pixbuf"]
+minifb = ["dep:minifb"]
+cli = []
 unofficial_ops = []
 
 [dependencies]
-# GTK4 for the user interface
-gtk = { version = "0.7.0", package = "gtk4", features = ["v4_8"] }
-gio = { version = "0.18.0", features = ["v2_66"] }
-glib = "0.18.0"
-gdk4 = { version = "0.7.0", features = ["v4_8"] }
-gdk-pixbuf = "0.18.0"
-
 # Error handling and logging
 anyhow = "1.0"
 thiserror = "1.0"
@@ -36,20 +49,29 @@ bitflags = "2.0"
 bytemuck = { version = "1.0", features = ["derive"] }
 zip = "0.6.6"
 
-# For future use (audio, etc.)
-# rodio = "0.17"
-# image = { version = "0.24", default-features = false, features = ["png"] }
+# Graphics - GTK4 (optional)
+gtk = { version = "0.10", package = "gtk4", optional = true }
+glib = { version = "0.10", optional = true }
+cairo-rs = { version = "0.21", optional = true }
+gdk-pixbuf = { version = "0.21", optional = true }
+
+# Graphics - minifb (optional)
+minifb = { version = "0.27", optional = true }
 
 [dev-dependencies]
 assert_matches = "1.5"
+
+[profile.dev]
+opt-level = 1
+overflow-checks = true
+panic = "abort"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
-
-[profile.dev]
-opt-level = 1  # Better performance during development
+panic = "abort"
+strip = true
 
 [profile.bench]
 opt-level = 3

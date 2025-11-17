@@ -1,6 +1,4 @@
 use crate::nes::utils::Memory;
-use std::fmt;
-use std::ptr;
 
 /// A wrapper around `Nes` that implements `Memory` for the CPU.
 /// This is needed to break the circular dependency between `Cpu` and `Nes`.
@@ -14,7 +12,7 @@ impl CpuMemory {
     pub fn new(nes: *mut dyn Memory) -> Self {
         CpuMemory { nes }
     }
-    
+
     /// Get a mutable reference to the underlying memory, if available
     fn get_memory(&self) -> Option<&mut dyn Memory> {
         if self.nes.is_null() {
@@ -39,7 +37,7 @@ impl Memory for CpuMemory {
         }
         Ok(())
     }
-    
+
     // Implement the remaining required methods from the Memory trait
     fn read_word(&self, addr: u16) -> Result<u16, crate::nes::utils::MemoryError> {
         match self.get_memory() {
@@ -47,7 +45,7 @@ impl Memory for CpuMemory {
             None => Ok(0), // Default value when no memory is available
         }
     }
-    
+
     fn write_word(&mut self, addr: u16, value: u16) -> Result<(), crate::nes::utils::MemoryError> {
         if let Some(memory) = self.get_memory() {
             memory.write_word(addr, value)?;
